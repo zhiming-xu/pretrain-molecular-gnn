@@ -18,4 +18,18 @@ def load_qm9(datafile):
 
     return Rs, Zs, Ds
 
+
+class DistanceExpansion:
+    def __init__(self, mean=0, std=.5, repeat=10):
+        self.gaussians = []
+        for i in range(repeat):
+            self.gaussians.append(
+                lambda x: np.exp(-0.5*((x-(mean+i*std))/std)**2)
+            )
+
+    def __call__(self, R):
+        '''compute Gaussian distance expansion, R should be a vector of R^{n*1}'''
+        gaussians = [g(R) for g in self.gaussians]
+        return np.concatenate(gaussians, axis=-1)
+
         
