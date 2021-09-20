@@ -8,9 +8,9 @@ import dgl.function as dglfn
 
 class AtomEmbedding(nn.Module):
     ''''Module for atom embedding'''
-    def __init__(self, emb_size):
+    def __init__(self, num_atom_types, emb_size):
         super(AtomEmbedding, self).__init__()
-        self.atom_emb = nn.Embedding(emb_size)
+        self.atom_emb = nn.Embedding(num_atom_types, emb_size)
 
     def forward(self, x):
         return self.atom_emb(x)
@@ -20,13 +20,15 @@ class AtomTypeGNN(nn.Module):
     def __init__(self, dist_exp_size, atom_emb_size, hidden_size):
         '''Module for message-passing in atom type prediction task'''
         super(AtomTypeGNN, self).__init__()
-        self.bilinear_w = nn.Parameter(th.FloatTensor(
-            size=(dist_exp_size, atom_emb_size, hidden_size)
+        bilinear_w = nn.Parameter(th.FloatTensor(
+            th.rand(dist_exp_size, atom_emb_size, hidden_size)
         ))
-        self.bilinear_b = nn.Parameter(th.FloatTensor(
-            size=(hidden_size)
+        bilinear_b = nn.Parameter(th.FloatTensor(
+            th.rand(hidden_size)
         ))
         self.activation = nn.Softplus()
+        self.register_parameter('bilinear_w', bilinear_w)
+        self.register_parameter('bilinear_b', bilinear_b)
 
     def forward(self, dist_adj, dist_exp, atom_emb):
         with dist_adj.local_scope():
@@ -82,6 +84,7 @@ class VAE(nn.Module):
         '''Module for variational autoencoder'''
         super(VAE, self).__init__()
         self.nn_mean, self.nn_std = [], []
+        self.kl_div = lambda mean, logstd: 0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
         for i in range(num_layers):
             if i == 0:
                 self.nn_mean.append(nn.Linear(emb_size, hidden_size))
@@ -93,53 +96,52 @@ class VAE(nn.Module):
             self.nn_std.append(nn.LeakyReLU())
         
         self.nn_mean = nn.Sequential(self.nn_mean)
-        self.nn_std = nn.Sequential(self.nn_std)
+        self.nn_logstd = nn.Sequential(self.nn_std)
 
     def forward(self, gaussians, h):
         mean = self.nn_mean(h)
-        std = self.nn_std(h)
-        return gaussians * std + mean
+        logstd = self.nn_std(h)
+        return mean + th.exp(0.5 * logstd), self.kl_div(mean, logstd)
 
 
 class SSLMolecule(nn.Module):
-    def __init__(self, atom_emb_size, dist_exp_size, hidden_size, pos_size,
-                 gaussian_size, num_type_layers, num_pos_layers, num_vae_layers):
+    def __init__(self, num_atom_types, atom_emb_size, dist_exp_size, hidden_size,
+                 pos_size, gaussian_size, num_type_layers, num_pos_layers, num_vae_layers):
         super(SSLMolecule, self).__init__()
         assert(pos_size==3, '3D coordinates required')
         self.gaussian_size = gaussian_size
         # shared atom embedding
-        self.atom_emb = AtomEmbedding(atom_emb_size)
+        self.atom_emb = AtomEmbedding(num_atom_types, atom_emb_size)
         # for pretraining task 1 - central atom type prediction based on
         # ditance expansion and atom embedding
         self.atom_type_gnn = AtomTypeGNN(dist_exp_size, atom_emb_size, hidden_size)
         self.atom_classifier = AtomTypeClassifier(num_type_layers, hidden_size, hidden_size)
+        self.bce_loss = nn.BCEWithLogitsLoss()
         
         # for pretraining task 2 - central atom position prediction based on
         # surrounding atom position and embedding
         self.atom_pos_gnn = AtomPosGNN(num_pos_layers, hidden_size, atom_emb_size)
         self.atom_pos_vae = VAE(hidden_size, gaussian_size, num_vae_layers)
         self.atom_pos_linear = nn.Linear(hidden_size, pos_size)
+        self.mse_loss = nn.MSELoss()
 
-    def forward(self, dist_graph, dist_exp, atom_emb):
+    def forward(self, atom_pos, dist_graph, dist_exp, atom_ids):
         '''
         Rs - atom position
         Zs - atom type
         '''
         num_atoms = dist_graph.shape[0]
-        atom_emb = self.atom_emb(atom_emb)
+        atom_ids = self.atom_emb(atom_ids)
         # for atom type prediction
-        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_emb)
+        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_ids)
         atom_type_pred = self.atom_classifier(atom_emb_type)
+        loss_atom_pred = self.bce_loss(atom_ids, atom_type_pred)
 
         # for atom position prediction
-        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_emb)
+        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_ids)
         gaussians = th.rand((num_atoms, self.gaussian_size))
-        atom_pos_vae = self.atom_pos_vae(gaussians, atom_emb_pos)
+        atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, atom_emb_pos)
         atom_pos_pred = self.atom_pos_linear(atom_pos_vae)
+        loss_pos_pred = self.mse_loss(atom_pos, atom_pos_pred)
 
-        return atom_type_pred, atom_pos_pred, atom_pos_vae
-
-
-class SSLMoleculeLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
+        return loss_atom_pred, loss_pos_pred, loss_vae
