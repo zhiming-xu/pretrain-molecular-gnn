@@ -28,14 +28,14 @@ class AtomTypeGNN(nn.Module):
         ))
         self.activation = nn.Softplus()
 
-    def forward(self, dist_graph, dist_exp, atom_emb):
-        with dist_graph.local_scope():
+    def forward(self, dist_adj, dist_exp, atom_emb):
+        with dist_adj.local_scope():
             feat_src = th.eisum('nf,fhk,nh->nk', dist_exp, self.bilinear_w, atom_emb)
-            dist_graph.srcdata['h'] = feat_src
-            dist_graph.update_all(dglfn.copy_src('h', 'm'), dglfn.sum(msg='m', out='h'))
+            dist_adj.srcdata['h'] = feat_src
+            dist_adj.update_all(dglfn.copy_src('h', 'm'), dglfn.sum(msg='m', out='h'))
             # FIXME: better way to exclude center node it self (masking)
-            dist_graph.dstdata['h'] -= feat_src
-            rst = self.activation(dist_graph.dstdata['h']) + self.bilinear_b
+            dist_adj.dstdata['h'] -= feat_src
+            rst = self.activation(dist_adj.dstdata['h']) + self.bilinear_b
             return rst
 
 
@@ -70,10 +70,10 @@ class AtomPosGNN(nn.Module):
             # should be no zero indegree
             self.layers.append(dglnn.GraphConv(in_feat_size, hidden_size, activation=F.softplus))
     
-    def forward(self, atom_pos, dist_graph, atom_emb):
+    def forward(self, atom_pos, dist_adj, atom_emb):
         feat = th.concat(atom_pos, atom_emb, dim=-1)
         for layer in self.layers:
-            feat = layer(dist_graph, feat)
+            feat = layer(dist_adj, feat)
         return feat
         
 
@@ -101,10 +101,10 @@ class VAE(nn.Module):
         return gaussians * std + mean
 
 
-class SSL_Molecule(nn.Module):
+class SSLMolecule(nn.Module):
     def __init__(self, atom_emb_size, dist_exp_size, hidden_size, pos_size,
                  gaussian_size, num_type_layers, num_pos_layers, num_vae_layers):
-        super(SSL_Molecule, self).__init__()
+        super(SSLMolecule, self).__init__()
         assert(pos_size==3, '3D coordinates required')
         self.gaussian_size = gaussian_size
         # shared atom embedding
@@ -120,21 +120,26 @@ class SSL_Molecule(nn.Module):
         self.atom_pos_vae = VAE(hidden_size, gaussian_size, num_vae_layers)
         self.atom_pos_linear = nn.Linear(hidden_size, pos_size)
 
-    def forward(self, Rs, Ds, As, Zs, gaussians):
+    def forward(self, dist_graph, dist_exp, atom_emb):
         '''
         Rs - atom position
         Zs - atom type
         '''
-        num_atoms = Rs.shape[0]
-        atom_emb = self.atom_emb(Zs)
+        num_atoms = dist_graph.shape[0]
+        atom_emb = self.atom_emb(atom_emb)
         # for atom type prediction
-        atom_emb_type = self.atom_type_gnn(Rs, Ds, atom_emb)
+        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_emb)
         atom_type_pred = self.atom_classifier(atom_emb_type)
 
         # for atom position prediction
-        atom_emb_pos = self.atom_pos_gnn(Rs, Ds, atom_emb)
+        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_emb)
         gaussians = th.rand((num_atoms, self.gaussian_size))
-        atom_vae_pos = self.atom_pos_vae(gaussians, atom_emb_pos)
-        atom_pos_pred = self.atom_pos_linear(atom_vae_pos)
+        atom_pos_vae = self.atom_pos_vae(gaussians, atom_emb_pos)
+        atom_pos_pred = self.atom_pos_linear(atom_pos_vae)
 
-        return atom_type_pred, atom_pos_pred
+        return atom_type_pred, atom_pos_pred, atom_pos_vae
+
+
+class SSLMoleculeLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
