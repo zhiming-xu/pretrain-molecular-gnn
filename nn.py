@@ -31,14 +31,10 @@ class AtomTypeGNN(nn.Module):
         self.register_parameter('bilinear_b', bilinear_b)
 
     def forward(self, dist_adj, dist_exp, atom_emb):
-        with dist_adj.local_scope():
-            feat_src = th.eisum('nf,fhk,nh->nk', dist_exp, self.bilinear_w, atom_emb)
-            dist_adj.srcdata['h'] = feat_src
-            dist_adj.update_all(dglfn.copy_src('h', 'm'), dglfn.sum(msg='m', out='h'))
-            # FIXME: better way to exclude center node it self (masking)
-            dist_adj.dstdata['h'] -= feat_src
-            rst = self.activation(dist_adj.dstdata['h']) + self.bilinear_b
-            return rst
+        adj_exp = th.einsum('mn,mnk->mk', dist_adj, dist_exp)
+        feat = th.einsum('nf,fhk,nh->nk', adj_exp, self.bilinear_w, atom_emb)
+        rst = self.activation(feat) + self.bilinear_b
+        return rst
 
 
 class AtomTypeClassifier(nn.Module):
@@ -73,7 +69,7 @@ class AtomPosGNN(nn.Module):
             self.layers.append(dglnn.GraphConv(in_feat_size, hidden_size, activation=F.softplus))
     
     def forward(self, atom_pos, dist_adj, atom_emb):
-        feat = th.concat(atom_pos, atom_emb, dim=-1)
+        feat = th.cat([atom_pos, atom_emb], dim=-1)
         for layer in self.layers:
             feat = layer(dist_adj, feat)
         return feat
@@ -117,7 +113,7 @@ class SSLMolecule(nn.Module):
         self.atom_type_gnn = AtomTypeGNN(dist_exp_size, atom_emb_size, hidden_size)
         self.atom_classifier = AtomTypeClassifier(num_type_layers, hidden_size, hidden_size,
                                                   num_atom_types)
-        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.ce_loss = nn.CrossEntropyLoss()
         
         # for pretraining task 2 - central atom position prediction based on
         # surrounding atom position and embedding
@@ -126,17 +122,17 @@ class SSLMolecule(nn.Module):
         self.atom_pos_linear = nn.Linear(hidden_size, pos_size)
         self.mse_loss = nn.MSELoss()
 
-    def forward(self, atom_pos, dist_graph, dist_exp, atom_embs):
+    def forward(self, atom_pos, dist_graph, dist_exp, atom_types):
         '''
         Rs - atom position
         Zs - atom type
         '''
         num_atoms = atom_pos.shape[0]
-        atom_embs = self.atom_emb(atom_embs)
+        atom_embs = self.atom_emb(atom_types)
         # for atom type prediction
         atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_embs)
         atom_type_pred = self.atom_classifier(atom_emb_type)
-        loss_atom_pred = self.bce_loss(atom_embs, atom_type_pred)
+        loss_atom_pred = self.ce_loss(atom_type_pred, atom_types)
 
         # for atom position prediction
         atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_embs)
@@ -148,14 +144,21 @@ class SSLMolecule(nn.Module):
         return loss_atom_pred, loss_pos_pred, loss_vae
 
 
+class Gaussian(nn.Module):
+    def __init__(self, mean, std):
+        super(Gaussian, self).__init__()
+        self.mean, self.std = mean, std
+
+    def forward(self, x):
+        return th.exp(-0.5*((x-self.mean)/self.std)**2)
+
+
 class DistanceExpansion(nn.Module):
-    def __init__(self, mean=0, std=.5, repeat=10):
+    def __init__(self, mean=0, std=1, step=0.2, repeat=10):
         super(DistanceExpansion, self).__init__()
-        self.gaussians = []
-        for i in range(repeat):
-            self.gaussians.append(
-                lambda x: th.exp(-0.5*((x-(mean+i*std))/std)**2)
-            )
+        self.gaussians = nn.ModuleList(
+            [Gaussian(mean+i*step, std) for i in range(repeat)]
+        )
 
     def forward(self, D):
         '''compute Gaussian distance expansion, R should be a vector of R^{n*1}'''
