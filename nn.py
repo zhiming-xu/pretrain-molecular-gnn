@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import dgl
 import dgl.nn as dglnn
 import dgl.function as dglfn
+import scipy.sparse as sp
 
 
 class AtomEmbedding(nn.Module):
@@ -66,12 +67,17 @@ class AtomPosGNN(nn.Module):
         in_feat_size = atom_emb_size + pos_size # concat atom embedding and position
         for i in range(num_layers):
             # should be no zero indegree
-            self.layers.append(dglnn.GraphConv(in_feat_size, hidden_size, activation=F.softplus))
+            if i == 0:
+                self.layers.append(dglnn.GraphConv(in_feat_size, hidden_size, activation=F.softplus))
+            else:
+                self.layers.append(dglnn.GraphConv(hidden_size, hidden_size, activation=F.softplus))
     
     def forward(self, atom_pos, dist_adj, atom_emb):
+        dist_adj -= th.eye(dist_adj.shape[0])
+        graph = dgl.from_scipy(sp.csr_matrix(dist_adj))
         feat = th.cat([atom_pos, atom_emb], dim=-1)
         for layer in self.layers:
-            feat = layer(dist_adj, feat)
+            feat = layer(graph, feat)
         return feat
         
 
@@ -79,25 +85,25 @@ class VAE(nn.Module):
     def __init__(self, emb_size, hidden_size, num_layers):
         '''Module for variational autoencoder'''
         super(VAE, self).__init__()
-        nn_mean, nn_std = [], []
+        nn_mean, nn_logstd = [], []
         self.kl_div = lambda mean, logstd: 0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
         for i in range(num_layers):
             if i == 0:
                 nn_mean.append(nn.Linear(emb_size, hidden_size))
-                nn_std.append(nn.Linear(emb_size, hidden_size))
+                nn_logstd.append(nn.Linear(emb_size, hidden_size))
             else:
                 nn_mean.append(nn.Linear(hidden_size, hidden_size))
-                nn_std.append(nn.Linear(emb_size, hidden_size))
+                nn_logstd.append(nn.Linear(emb_size, hidden_size))
             nn_mean.append(nn.LeakyReLU())
-            nn_std.append(nn.LeakyReLU())
+            nn_logstd.append(nn.LeakyReLU())
         
         self.nn_mean = nn.Sequential(*nn_mean)
-        self.nn_logstd = nn.Sequential(*nn_std)
+        self.nn_logstd = nn.Sequential(*nn_logstd)
 
     def forward(self, gaussians, h):
         mean = self.nn_mean(h)
-        logstd = self.nn_std(h)
-        return mean + th.exp(0.5 * logstd), self.kl_div(mean, logstd)
+        logstd = self.nn_logstd(h)
+        return mean + gaussians * th.exp(0.5 * logstd), self.kl_div(mean, logstd)
 
 
 class SSLMolecule(nn.Module):
@@ -122,7 +128,7 @@ class SSLMolecule(nn.Module):
         self.atom_pos_linear = nn.Linear(hidden_size, pos_size)
         self.mse_loss = nn.MSELoss()
 
-    def forward(self, atom_pos, dist_graph, dist_exp, atom_types):
+    def forward(self, atom_pos, dist_adj, dist_exp, atom_types):
         '''
         Rs - atom position
         Zs - atom type
@@ -130,12 +136,12 @@ class SSLMolecule(nn.Module):
         num_atoms = atom_pos.shape[0]
         atom_embs = self.atom_emb(atom_types)
         # for atom type prediction
-        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_embs)
+        atom_emb_type = self.atom_type_gnn(dist_adj, dist_exp, atom_embs)
         atom_type_pred = self.atom_classifier(atom_emb_type)
         loss_atom_pred = self.ce_loss(atom_type_pred, atom_types)
 
         # for atom position prediction
-        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_embs)
+        atom_emb_pos = self.atom_pos_gnn(atom_pos, dist_adj, atom_embs)
         gaussians = th.rand((num_atoms, self.gaussian_size))
         atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, atom_emb_pos)
         atom_pos_pred = self.atom_pos_linear(atom_pos_vae)
