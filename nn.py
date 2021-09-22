@@ -45,17 +45,17 @@ class AtomTypeClassifier(nn.Module):
     '''Module for predicting central atom type based on neighbor information'''
     def __init__(self, num_layers, emb_size, hidden_size, num_types):
         super(AtomTypeClassifier, self).__init__()
-        self.classifier = []
+        classifier = []
         assert(num_layers>1, '# of total layers must be larger than 1')
         for i in range(num_layers):
             if i == 0:
-                self.classifier.append(nn.Linear(emb_size, hidden_size))
+                classifier.append(nn.Linear(emb_size, hidden_size))
             elif i == num_layers - 1:
-                self.classifier.append(nn.Linear(hidden_size, num_types))
+                classifier.append(nn.Linear(hidden_size, num_types))
             else:
-                self.classifier.append(nn.Linear(hidden_size, hidden_size))
-            self.classifier.append(nn.Softplus())
-        self.classifier = nn.Sequential(self.classifier)
+                classifier.append(nn.Linear(hidden_size, hidden_size))
+            classifier.append(nn.Softplus())
+        self.classifier = nn.Sequential(*classifier)
 
     def forward(self, h):
         logits = self.classifier(h)
@@ -83,20 +83,20 @@ class VAE(nn.Module):
     def __init__(self, emb_size, hidden_size, num_layers):
         '''Module for variational autoencoder'''
         super(VAE, self).__init__()
-        self.nn_mean, self.nn_std = [], []
+        nn_mean, nn_std = [], []
         self.kl_div = lambda mean, logstd: 0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
         for i in range(num_layers):
             if i == 0:
-                self.nn_mean.append(nn.Linear(emb_size, hidden_size))
-                self.nn_std.append(nn.Linear(emb_size, hidden_size))
+                nn_mean.append(nn.Linear(emb_size, hidden_size))
+                nn_std.append(nn.Linear(emb_size, hidden_size))
             else:
-                self.nn_mean.append(nn.Linear(hidden_size, hidden_size))
-                self.nn_std.append(nn.Linear(emb_size, hidden_size))
-            self.nn_mean.append(nn.LeakyReLU())
-            self.nn_std.append(nn.LeakyReLU())
+                nn_mean.append(nn.Linear(hidden_size, hidden_size))
+                nn_std.append(nn.Linear(emb_size, hidden_size))
+            nn_mean.append(nn.LeakyReLU())
+            nn_std.append(nn.LeakyReLU())
         
-        self.nn_mean = nn.Sequential(self.nn_mean)
-        self.nn_logstd = nn.Sequential(self.nn_std)
+        self.nn_mean = nn.Sequential(*nn_mean)
+        self.nn_logstd = nn.Sequential(*nn_std)
 
     def forward(self, gaussians, h):
         mean = self.nn_mean(h)
@@ -115,7 +115,8 @@ class SSLMolecule(nn.Module):
         # for pretraining task 1 - central atom type prediction based on
         # ditance expansion and atom embedding
         self.atom_type_gnn = AtomTypeGNN(dist_exp_size, atom_emb_size, hidden_size)
-        self.atom_classifier = AtomTypeClassifier(num_type_layers, hidden_size, hidden_size)
+        self.atom_classifier = AtomTypeClassifier(num_type_layers, hidden_size, hidden_size,
+                                                  num_atom_types)
         self.bce_loss = nn.BCEWithLogitsLoss()
         
         # for pretraining task 2 - central atom position prediction based on
@@ -125,23 +126,40 @@ class SSLMolecule(nn.Module):
         self.atom_pos_linear = nn.Linear(hidden_size, pos_size)
         self.mse_loss = nn.MSELoss()
 
-    def forward(self, atom_pos, dist_graph, dist_exp, atom_ids):
+    def forward(self, atom_pos, dist_graph, dist_exp, atom_embs):
         '''
         Rs - atom position
         Zs - atom type
         '''
-        num_atoms = dist_graph.shape[0]
-        atom_ids = self.atom_emb(atom_ids)
+        num_atoms = atom_pos.shape[0]
+        atom_embs = self.atom_emb(atom_embs)
         # for atom type prediction
-        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_ids)
+        atom_emb_type = self.atom_type_gnn(dist_graph, dist_exp, atom_embs)
         atom_type_pred = self.atom_classifier(atom_emb_type)
-        loss_atom_pred = self.bce_loss(atom_ids, atom_type_pred)
+        loss_atom_pred = self.bce_loss(atom_embs, atom_type_pred)
 
         # for atom position prediction
-        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_ids)
+        atom_emb_pos = self.atom_pos_gnn(dist_graph, dist_exp, atom_embs)
         gaussians = th.rand((num_atoms, self.gaussian_size))
         atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, atom_emb_pos)
         atom_pos_pred = self.atom_pos_linear(atom_pos_vae)
         loss_pos_pred = self.mse_loss(atom_pos, atom_pos_pred)
 
         return loss_atom_pred, loss_pos_pred, loss_vae
+
+
+class DistanceExpansion(nn.Module):
+    def __init__(self, mean=0, std=.5, repeat=10):
+        super(DistanceExpansion, self).__init__()
+        self.gaussians = []
+        for i in range(repeat):
+            self.gaussians.append(
+                lambda x: th.exp(-0.5*((x-(mean+i*std))/std)**2)
+            )
+
+    def forward(self, D):
+        '''compute Gaussian distance expansion, R should be a vector of R^{n*1}'''
+        gaussians = [g(D) for g in self.gaussians]
+        return th.stack(gaussians, axis=-1)
+
+        
