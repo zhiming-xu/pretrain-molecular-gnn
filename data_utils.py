@@ -5,31 +5,20 @@ import numpy as np
 def load_qm9(datafile):
     mat = si.loadmat(datafile)
     # only use R and Z, and predict T
-    Rs, Zs = mat['R'].tolist(), mat['Z']
-    Ds = [] # pairwise distance
+    Rs, Zs = mat['R'], mat['Z']
+    new_Rs, new_Zs, Ds = [], [], []
     Ts = mat['T']
     
     for i, Z in enumerate(Zs):
-        non_zeros = np.nonzero(Zs)[0]
-        Rs[i] = Rs[i][non_zeros]
-        abs_D = Rs[i][None, :, :].repeat(5, axis=0)-Rs[i][:, None, :].repeat(5, axis=1)
+        non_zeros = np.nonzero(Z)[0]
+        new_Z = Zs[i][non_zeros]
+        new_Zs.append(new_Z)
+        new_R = Rs[i][non_zeros]
+        new_Rs.append(new_R)
+        abs_D = new_R[None, :, :].repeat(new_R.shape[0], axis=0) - \
+                new_R[:, None, :].repeat(new_R.shape[0], axis=1)
         D = np.linalg.norm(abs_D, axis=-1)
         Ds.append(D)
 
-    return Rs, Zs, Ds
+    return new_Rs, Zs.tolist(), Ds
 
-
-class DistanceExpansion:
-    def __init__(self, mean=0, std=.5, repeat=10):
-        self.gaussians = []
-        for i in range(repeat):
-            self.gaussians.append(
-                lambda x: np.exp(-0.5*((x-(mean+i*std))/std)**2)
-            )
-
-    def __call__(self, R):
-        '''compute Gaussian distance expansion, R should be a vector of R^{n*1}'''
-        gaussians = [g(R) for g in self.gaussians]
-        return np.concatenate(gaussians, axis=-1)
-
-        
