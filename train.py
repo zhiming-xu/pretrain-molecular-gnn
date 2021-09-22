@@ -1,8 +1,6 @@
 import torch as th
 from torch.optim import SGD, Adam
 import os.path
-import dgl
-import scipy.sparse as sp
 from argparse import ArgumentParser
 
 from nn import SSLMolecule, DistanceExpansion
@@ -32,7 +30,7 @@ def main():
     args = parser.parse_args()
     datafile = os.path.join(args.data_dir, args.dataset)
 
-    Rs, Zs, Ds = load_qm9(datafile)
+    Rs, Zs, Ds = load_qm7(datafile)
 
     model = SSLMolecule(num_atom_types=args.num_atom_types,
         atom_emb_size=args.atom_emb_size, dist_exp_size=args.dist_exp_size,
@@ -43,7 +41,7 @@ def main():
 
     optimizer = SGD(model.parameters(), lr=args.lr)
 
-    dist_exp = DistanceExpansion()
+    dist_exp = DistanceExpansion(repeat=args.dist_exp_size)
     cutoff = args.cutoff
 
     weight_l1, weight_l2 = args.weight_l1, args.weight_l2
@@ -51,12 +49,11 @@ def main():
     for epoch in range(args.num_epochs):
         model.zero_grad()
         for R, Z, D in zip(Rs, Zs, Ds):
-            A = (D <= cutoff)
-            G_dist = dgl.from_scipy(sp.csr_matrix(A))
+            A = th.FloatTensor((D<=cutoff))
             R, Z, D = th.FloatTensor(R), th.LongTensor(Z), th.FloatTensor(D)
             D_exp = dist_exp(D)
  
-            loss_atom_pred, loss_pos_pred, loss_vae = model(R, G_dist, D_exp, Z)
+            loss_atom_pred, loss_pos_pred, loss_vae = model(R, A, D_exp, Z)
             loss = weight_l1 * (loss_atom_pred.sum()) + \
                    weight_l2 * (loss_pos_pred.sum() + loss_vae.sum())
 

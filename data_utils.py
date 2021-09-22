@@ -2,7 +2,7 @@ import scipy.io as si
 import numpy as np
 
 
-def load_qm9(datafile):
+def load_qm7(datafile):
     mat = si.loadmat(datafile)
     # only use R and Z, and predict T
     Rs, Zs = mat['R'], mat['Z']
@@ -20,5 +20,5 @@ def load_qm9(datafile):
         D = np.linalg.norm(abs_D, axis=-1)
         Ds.append(D)
 
-    return new_Rs, Zs.tolist(), Ds
+    return new_Rs, new_Zs, Ds
 
