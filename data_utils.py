@@ -2,6 +2,9 @@ import scipy.io as si
 import numpy as np
 
 
+z2id = {1:0, 6: 1, 7:2, 8:3, 16: 4}
+
+
 def load_qm7(datafile):
     mat = si.loadmat(datafile)
     # only use R and Z, and predict T
@@ -12,6 +15,7 @@ def load_qm7(datafile):
     for i, Z in enumerate(Zs):
         non_zeros = np.nonzero(Z)[0]
         new_Z = Zs[i][non_zeros]
+        new_Z = np.array(list(map(z2id.__getitem__, new_Z)), dtype=int)
         new_Zs.append(new_Z)
         new_R = Rs[i][non_zeros]
         new_Rs.append(new_R)
