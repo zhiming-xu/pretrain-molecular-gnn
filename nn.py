@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import dgl
 import dgl.nn as dglnn
-import dgl.function as dglfn
 import scipy.sparse as sp
 
 
@@ -75,7 +74,7 @@ class AtomPosGNN(nn.Module):
     def forward(self, atom_pos, dist_adj, atom_emb):
         dist_adj -= th.eye(dist_adj.shape[0])
         graph = dgl.from_scipy(sp.csr_matrix(dist_adj))
-        feat = th.cat([atom_pos, atom_emb], dim=-1)
+        feat = th.cat([atom_emb, atom_pos], dim=-1)
         for layer in self.layers:
             feat = layer(graph, feat)
         return feat
@@ -86,7 +85,7 @@ class VAE(nn.Module):
         '''Module for variational autoencoder'''
         super(VAE, self).__init__()
         nn_mean, nn_logstd = [], []
-        self.kl_div = lambda mean, logstd: 0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
+        self.kld_loss = lambda mean, logstd: -0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
         for i in range(num_layers):
             if i == 0:
                 nn_mean.append(nn.Linear(emb_size, hidden_size))
@@ -94,8 +93,8 @@ class VAE(nn.Module):
             else:
                 nn_mean.append(nn.Linear(hidden_size, hidden_size))
                 nn_logstd.append(nn.Linear(emb_size, hidden_size))
-            nn_mean.append(nn.LeakyReLU())
-            nn_logstd.append(nn.LeakyReLU())
+            nn_mean.append(nn.Softplus())
+            nn_logstd.append(nn.Softplus())
         
         self.nn_mean = nn.Sequential(*nn_mean)
         self.nn_logstd = nn.Sequential(*nn_logstd)
@@ -103,7 +102,7 @@ class VAE(nn.Module):
     def forward(self, gaussians, h):
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
-        return mean + gaussians * th.exp(0.5 * logstd), self.kl_div(mean, logstd)
+        return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
 
 
 class SSLMolecule(nn.Module):
@@ -149,6 +148,10 @@ class SSLMolecule(nn.Module):
 
         return loss_atom_pred, loss_pos_pred, loss_vae
 
+    def encode(self, atom_pos, atom_types):
+        atom_embs = self.atom_emb(atom_types)
+        return th.cat([atom_embs, atom_pos], axis=-1)
+
 
 class Gaussian(nn.Module):
     def __init__(self, mean, std):
@@ -171,4 +174,30 @@ class DistanceExpansion(nn.Module):
         gaussians = [g(D) for g in self.gaussians]
         return th.stack(gaussians, axis=-1)
 
+
+class PropertyPrediction(nn.Module):
+    def __init__(self, input_size, hidden_size=32, num_layers=3):
+        super(PropertyPrediction, self).__init__()
+        W = nn.Parameter(th.rand(input_size))
+        b = nn.Parameter(th.rand(input_size))
+        self.register_parameter('W', W)
+        self.register_parameter('b', b)
+        self.loss = nn.L1Loss()
+
+        nets = []
+        for i in range(num_layers):
+            if i == 0:
+                nets.append(nn.Linear(input_size, hidden_size))
+            elif i == num_layers - 1:
+                nets.append(nn.Linear(hidden_size, 1))
+                # break # don't apply softplus for the last layer
+            else:
+                nets.append(nn.Linear(hidden_size, hidden_size))
+            nets.append(nn.Tanh())
         
+        self.nn = nn.Sequential(*nets)
+    
+    def forward(self, x, target):
+        h = th.einsum('nf,f->f', x, self.W) + self.b
+        h = self.nn(h)
+        return self.loss(h, target)
