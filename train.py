@@ -43,15 +43,19 @@ def main():
     args = parser.parse_args()
     args.running_id = '%s_%s' % (args.dataset, datetime.strftime(datetime.now(), '%Y-%m-%d_%H%M'))
     # create tensorboard summary writer
-    sw = SummaryWriter(f'logs/{args.running_id}')
 
     if args.pretrain:
-        pretrain(args, sw)
+        pretrain(args)
     if args.test:
-        pred(args, sw)
+        pred(args)
 
 
-def pretrain(args, sw):
+def pretrain(args):
+    # save arguments
+    with open(f'logs/{args.running_id}/args.json', 'w') as f:
+        json.dump(vars(args), f)
+    # create summary writer
+    sw = SummaryWriter(f'logs/{args.running_id}_pretrain')
     # save arguments
     datafile = os.path.join(args.data_dir, args.dataset)
 
@@ -110,9 +114,12 @@ def pretrain(args, sw):
             th.save(model.state_dict(), f'logs/{args.running_id}/epoch_%d.th' % epoch)
 
 
-def pred(args, sw):
+def pred(args):
+    # save arguments
     with open(f'logs/{args.running_id}/args.json', 'w') as f:
         json.dump(vars(args), f)
+    # create summary writer
+    sw = SummaryWriter(f'logs/{args.running_id}_predict')
     datafile = os.path.join(args.data_dir, args.dataset)
 
     Rs, Zs, _, Ts = load_qm7_dataset(datafile)
