@@ -1,5 +1,6 @@
 import scipy.io as si
 import numpy as np
+import torch as th
 from torch.utils.data import Dataset
 
 
@@ -32,19 +33,23 @@ def load_qm7_dataset(datafile):
     return new_Rs, new_Zs, Ds, Ts
 
 
-class DataContainer(Dataset):
+class QMDataset(Dataset):
     def __repr__(self):
          return "DataContainer"
     def __init__(self, filename):
         #read in data
-        dictionary = np.load(filename)
+        extension_name = filename.split('.')[-1]
+        if extension_name == 'npz':
+            dictionary = np.load(filename)
+        elif extension_name == 'mat':
+            dictionary = si.loadmat(filename) 
         #number of atoms
         if 'N' in dictionary: 
-            self._N = dictionary['N'] 
+            self._N = dictionary['N'].flatten()
         else:
             self._N = None
         #atomic numbers/nuclear charges
-        if 'Z' in dictionary: 
+        if 'Z' in dictionary:
             self._Z = dictionary['Z'] 
         else:
             self._Z = None
@@ -70,7 +75,7 @@ class DataContainer(Dataset):
             self._R = None
         #reference energy
         if 'E' in dictionary:
-            self._E = dictionary['E'] 
+            self._E = dictionary['E'].flatten()
         else:
             self._E = None
         #reference atomic energies
@@ -219,5 +224,11 @@ class DataContainer(Dataset):
             #increment totals
             Ntot += N
             Itot += I
+
+        for k, v in data.items():
+            if k in ['Z', 'idx_i', 'idx_j']:
+                data[k] = th.LongTensor(v)
+            else:
+                data[k] = th.FloatTensor(v)
 
         return data
