@@ -32,6 +32,7 @@ parser.add_argument('-weight_l2', type=float, default=0.1)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-test', action='store_true')
+parser.add_argument('-predict_train_ratio', type=float, default=.8)
 parser.add_argument('-lr', type=float, default=1e-3)
 parser.add_argument('-pretrain_epochs', type=int, default=100)
 parser.add_argument('-pred_epochs', type=int, default=200)
@@ -51,11 +52,11 @@ def main():
 
 
 def pretrain(args):
-    # save arguments
-    with open(f'logs/{args.running_id}/args.json', 'w') as f:
-        json.dump(vars(args), f)
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_pretrain')
+    # save arguments
+    with open(f'logs/{args.running_id}_pretrain/args.json', 'w') as f:
+        json.dump(vars(args), f)
     # save arguments
     datafile = os.path.join(args.data_dir, args.dataset)
 
@@ -115,11 +116,11 @@ def pretrain(args):
 
 
 def pred(args):
-    # save arguments
-    with open(f'logs/{args.running_id}/args.json', 'w') as f:
-        json.dump(vars(args), f)
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
+    # save arguments
+    with open(f'logs/{args.running_id}_predict/args.json', 'w') as f:
+        json.dump(vars(args), f)
     datafile = os.path.join(args.data_dir, args.dataset)
 
     Rs, Zs, _, Ts = load_qm7_dataset(datafile)
@@ -139,12 +140,14 @@ def pred(args):
     optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
     optimizer2 = SGD(pred_model.parameters(), lr=1e-3)
 
+    total = len(Ts)
+    num_train = round(total * args.predict_train_ratio)
+    num_test = total - num_train
     for epoch in tqdm(range(args.pred_epochs)):
         pred_losses, test_losses = [], []
-        cnt = 5000
+        cnt = 0
         for R, Z, T in zip(Rs, Zs, Ts):
-            cnt -= 1
-            if cnt >= 0:
+            if cnt < num_train:
                 pretrain_model.zero_grad()
                 pred_model.zero_grad()
                 R, Z, T = th.FloatTensor(R), th.LongTensor(Z), th.FloatTensor(T)
@@ -160,10 +163,10 @@ def pred(args):
                     h = pretrain_model.encode(R, Z)
                     loss = pred_model(h, T)
                     test_losses.append(loss)
+            cnt += 1
         
-        total = len(Ts)
-        sw.add_scalar('Loss/Pred', sum(pred_losses)/cnt, epoch)
-        sw.add_scalar('Loss/Test', sum(test_losses)/(total-cnt), epoch)
+        sw.add_scalar('Loss/Pred', sum(pred_losses)/num_train, epoch)
+        sw.add_scalar('Loss/Test', sum(test_losses)/num_test, epoch)
 
 
 if __name__ == '__main__':
