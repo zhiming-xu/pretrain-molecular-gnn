@@ -1,7 +1,8 @@
 import torch as th
-from torch._C import namedtuple_eigenvalues_eigenvectors
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import math
 import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
@@ -235,7 +236,7 @@ class PhysNetInteractionLayer(nn.Module):
         for _ in range(num_residual):
             self.residuals.append(ResidualLayer(F, F, activation_fn, drop_prob))
         self.dense = nn.Linear(F, F) 
-        self.u = nn.Parameter(nn.rand(F))
+        self.u = nn.Parameter(th.rand(F))
 
     def forward(self, x, rbf, idx_i, idx_j):
         if self.activation_fn:
@@ -245,7 +246,9 @@ class PhysNetInteractionLayer(nn.Module):
         
         g = self.k2f(rbf)
         xi = self.dense_i(xa)
-        xj = th.scatter_add_(0, idx_i, g*th.gather(self.dense_j(xa), 0, idx_j))
+        xj = g * self.dense_j(xa)[idx_j]
+        num_atoms = x.shape[0]
+        xj = th.stack([th.sum(xj[idx_i==i], axis=0) for i in range(num_atoms)])
 
         m = xi + xj
 
@@ -265,11 +268,11 @@ class PhysNetRBFLayer(nn.Module):
         self.K = K
         self.cutoff = cutoff
         def softplus_inverse(x):
-            return x + th.log(-th.exp(x)-1)
-        centers = softplus_inverse(th.linspace(1., th.exp(-cutoff), K))
-        self.centers = nn.functional.softplus(centers)
+            return x + np.log(-np.expm1(-x))
+        centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), K))
+        self.centers = nn.functional.softplus(th.FloatTensor(centers))
 
-        widths = [softplus_inverse((.5/((1-th.exp(-cutoff))/K))**2)] * K
+        widths = th.FloatTensor([softplus_inverse((.5/((1.-np.exp(-cutoff))/K))**2)] * K)
         self.widths = nn.functional.softplus(widths)
 
     def cutoff_fn(self, D):
@@ -320,11 +323,11 @@ class PhysNetOutputBlock(nn.Module):
 
 
 def shifted_softplus(x):
-    return nn.functional.softplus(x) - th.log(2.)
+    return nn.functional.softplus(x) - math.log(2.)
 
 
 class PhysNet(nn.Module):
-    def __init__(self, F, K, short_cutoff, long_cutoff=None, num_blocks=3, num_residual_atom=2,
+    def __init__(self, F=128, K=5, short_cutoff=10., long_cutoff=None, num_blocks=5, num_residual_atom=2,
                  num_residual_interaction=2, num_residual_output=1, drop_prob=.5, activation_fn=shifted_softplus):
         super(PhysNet, self).__init__()
         self.num_blocks = num_blocks
@@ -342,12 +345,12 @@ class PhysNet(nn.Module):
             )
 
     def calculate_interatom_distance(self, R, idx_i, idx_j, offsets=None):
-        Ri = th.gather(R, idx_i)
-        Rj = th.gather(R, idx_j)
+        Ri = R[idx_i]
+        Rj = R[idx_j]
         if offsets:
             R += offsets
-        Dij = th.sqrt(nn.functional.relu(th.sum((Ri-Rj)**2, -1)))
-        return Dij
+        D_ij = th.sqrt(nn.functional.relu(th.sum((Ri-Rj)**2, -1)))
+        return D_ij
 
     def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None, short_idx_j=None, short_offsets=None):
         D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
@@ -359,7 +362,7 @@ class PhysNet(nn.Module):
             D_ij_short = D_ij_lr
         
         rbf = self.rbf_layer(D_ij_short)
-        x = th.gather(self.atom_embedding, Z)
+        x = self.atom_embedding(Z)
 
         E_total, Q_total = 0, 0
         nhloss, last_out2 = 0, 0
