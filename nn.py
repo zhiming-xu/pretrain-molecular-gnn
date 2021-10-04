@@ -20,8 +20,8 @@ class AtomEmbedding(nn.Module):
 
 
 class AtomTypeGNN(nn.Module):
+    '''Module for message-passing in atom type prediction task'''
     def __init__(self, dist_exp_size, atom_emb_size, hidden_size):
-        '''Module for message-passing in atom type prediction task'''
         super(AtomTypeGNN, self).__init__()
         bilinear_w = nn.Parameter(th.FloatTensor(
             th.rand(dist_exp_size, atom_emb_size, hidden_size)
@@ -62,8 +62,8 @@ class AtomTypeClassifier(nn.Module):
 
     
 class AtomPosGNN(nn.Module):
+    '''Module for message-passing in position prediction task'''
     def __init__(self, num_layers, hidden_size, atom_emb_size, pos_size=3):
-        '''Module for message-passing in position prediction task'''
         super(AtomPosGNN, self).__init__()
         self.layers = nn.ModuleList()
         in_feat_size = atom_emb_size + pos_size # concat atom embedding and position
@@ -84,8 +84,8 @@ class AtomPosGNN(nn.Module):
         
 
 class VAE(nn.Module):
+    '''Module for variational autoencoder'''
     def __init__(self, emb_size, hidden_size, num_layers):
-        '''Module for variational autoencoder'''
         super(VAE, self).__init__()
         nn_mean, nn_logstd = [], []
         self.kld_loss = lambda mean, logstd: -0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
@@ -109,6 +109,7 @@ class VAE(nn.Module):
 
 
 class SSLMolecule(nn.Module):
+    '''Module for self-supervised molecular representation learning'''
     def __init__(self, num_atom_types, atom_emb_size, dist_exp_size, hidden_size,
                  pos_size, gaussian_size, num_type_layers, num_pos_layers, num_vae_layers):
         super(SSLMolecule, self).__init__()
@@ -157,6 +158,7 @@ class SSLMolecule(nn.Module):
 
 
 class Gaussian(nn.Module):
+    '''one instance of Gaussian expansion'''
     def __init__(self, mean, std):
         super(Gaussian, self).__init__()
         self.mean, self.std = mean, std
@@ -166,6 +168,7 @@ class Gaussian(nn.Module):
 
 
 class DistanceExpansion(nn.Module):
+    ''''Distance expansion module, a series of Gaussians'''
     def __init__(self, mean=0, std=1, step=0.2, repeat=10):
         super(DistanceExpansion, self).__init__()
         self.gaussians = nn.ModuleList(
@@ -327,8 +330,9 @@ def shifted_softplus(x):
 
 
 class PhysNet(nn.Module):
-    def __init__(self, F=128, K=5, short_cutoff=10., long_cutoff=None, num_blocks=5, num_residual_atom=2,
-                 num_residual_interaction=2, num_residual_output=1, drop_prob=.5, activation_fn=shifted_softplus):
+    def __init__(self, F=128, K=5, num_element=20, short_cutoff=10., long_cutoff=None,
+                 num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
+                 num_residual_output=1, drop_prob=.5, activation_fn=shifted_softplus):
         super(PhysNet, self).__init__()
         self.num_blocks = num_blocks
         self.atom_embedding = AtomEmbedding(20, F)
@@ -352,7 +356,8 @@ class PhysNet(nn.Module):
         D_ij = th.sqrt(nn.functional.relu(th.sum((Ri-Rj)**2, -1)))
         return D_ij
 
-    def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None, short_idx_j=None, short_offsets=None):
+    def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
+                short_idx_j=None, short_offsets=None):
         D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
         if short_idx_i is not None and short_idx_j is not None:
             D_ij_short = self.calculate_interatom_distance(R, short_idx_i, short_idx_j, offsets=offsets)
@@ -376,4 +381,36 @@ class PhysNet(nn.Module):
                 nhloss += th.mean(out2/(out2 + last_out2 + 1e-7))
         
         return E_total, Q_total, nhloss
-            
+
+
+class PhysNetPretrain(PhysNet):
+    def __init__(self, F=128, K=5, num_element=20, short_cutoff=10, long_cutoff=None,
+                 num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
+                 num_residual_output=1, drop_prob=0.5, activation_fn=shifted_softplus):
+        super(PhysNetPretrain, self).__init__(
+            F=F, K=K, num_element=num_element, short_cutoff=short_cutoff, long_cutoff=long_cutoff,
+            num_blocks=num_blocks, num_residual_atom=num_residual_atom,
+            num_residual_interaction=num_residual_interaction,
+            num_residual_output=num_residual_output, drop_prob=drop_prob,
+            activation_fn=activation_fn
+        )
+        self.atom_classifier = AtomTypeClassifier(3, F, F, num_element)
+
+    def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
+                short_idx_j=None, short_offsets=None):
+        D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
+        if short_idx_i is not None and short_idx_j is not None:
+            D_ij_short = self.calculate_interatom_distance(R, short_idx_i, short_idx_j, offsets=offsets)
+        else:
+            short_idx_i = idx_i
+            short_idx_j = idx_j
+            D_ij_short = D_ij_lr
+        
+        rbf = self.rbf_layer(D_ij_short)
+        x = self.atom_embedding(Z)
+
+        for i in range(self.num_blocks):
+            x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
+
+        type_pred = self.atom_classifier(x)
+        return type_pred
