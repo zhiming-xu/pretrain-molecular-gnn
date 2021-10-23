@@ -2,11 +2,12 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import math
 import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
-from torch.nn.modules import activation
+
+
+from nn_utils import *
 
 
 class AtomEmbedding(nn.Module):
@@ -234,7 +235,7 @@ class AtomwiseAttention(nn.Module):
 
     def forward(self, xi, xj, num_atoms):
         att = th.bmm(xi.view(num_atoms, 1, self.F), xj.view(num_atoms, self.F, -1))
-        att = nn.functional.softmax(att, dim=-1)
+        att = F.softmax(att, dim=-1)
         return th.einsum('nom, nmf->nf', att, xj.view(num_atoms, -1, self.F))
 
 
@@ -284,13 +285,11 @@ class PhysNetRBFLayer(nn.Module):
         super(PhysNetRBFLayer, self).__init__()
         self.K = K
         self.cutoff = cutoff
-        def softplus_inverse(x):
-            return x + np.log(-np.expm1(-x))
         centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), K))
-        self.register_buffer('centers', nn.functional.softplus(th.FloatTensor(centers)))
+        self.register_buffer('centers', F.softplus(th.FloatTensor(centers)))
 
         widths = th.FloatTensor([softplus_inverse((.5/((1.-np.exp(-cutoff))/K))**2)] * K)
-        self.register_buffer('widths', nn.functional.softplus(widths))
+        self.register_buffer('widths', F.softplus(widths))
 
     def cutoff_fn(self, D):
         x = D/self.cutoff
@@ -339,10 +338,6 @@ class PhysNetOutputBlock(nn.Module):
         return self.dense(x)
 
 
-def shifted_softplus(x):
-    return nn.functional.softplus(x) - math.log(2.)
-
-
 class PhysNet(nn.Module):
     def __init__(self, F=128, K=5, num_element=20, short_cutoff=10., long_cutoff=None,
                  num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
@@ -367,7 +362,7 @@ class PhysNet(nn.Module):
         Rj = R[idx_j]
         if offsets:
             R += offsets
-        D_ij = th.sqrt(nn.functional.relu(th.sum((Ri-Rj)**2, -1)))
+        D_ij = th.sqrt(F.relu(th.sum((Ri-Rj)**2, -1)))
         return D_ij
 
     def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
@@ -457,3 +452,5 @@ class PhysNetPretrain(PhysNet):
             x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
 
         return x
+
+
