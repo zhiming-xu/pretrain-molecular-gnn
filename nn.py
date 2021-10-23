@@ -227,12 +227,25 @@ class ResidualLayer(nn.Module):
         return x
 
 
+class AtomwiseAttention(nn.Module):
+    def __init__(self, F):
+        super(AtomwiseAttention, self).__init__()
+        self.F = F
+
+    def forward(self, xi, xj, num_atoms):
+        att = th.bmm(xi.view(num_atoms, 1, self.F), xj.view(num_atoms, self.F, -1))
+        att = nn.functional.softmax(att, dim=-1)
+        return th.einsum('nom, nmf->nf', att, xj.view(num_atoms, -1, self.F))
+
+
 class PhysNetInteractionLayer(nn.Module):
     def __init__(self, K, F, num_residual, activation_fn=None, drop_prob=.5):
         super(PhysNetInteractionLayer, self).__init__()
         self.activation_fn = activation_fn
         self.dropout = nn.Dropout(drop_prob)
         self.k2f = nn.Linear(K, F, bias=False)
+        # add an atomwise attention module
+        self.atom_attention = AtomwiseAttention(F)
         self.dense_i = nn.Linear(F, F)
         self.dense_j = nn.Linear(F, F)
         self.residuals = nn.ModuleList()
@@ -251,7 +264,8 @@ class PhysNetInteractionLayer(nn.Module):
         xi = self.dense_i(xa)
         xj = g * self.dense_j(xa)[idx_j]
         num_atoms = x.shape[0]
-        xj = th.stack([th.sum(xj[idx_i==i], axis=0) for i in range(num_atoms)])
+        # xj = th.stack([th.sum(xj[idx_i==i], axis=0) for i in range(num_atoms)])
+        xj = self.atom_attention(xi, xj, num_atoms)
 
         m = xi + xj
 
@@ -273,10 +287,10 @@ class PhysNetRBFLayer(nn.Module):
         def softplus_inverse(x):
             return x + np.log(-np.expm1(-x))
         centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), K))
-        self.centers = nn.functional.softplus(th.FloatTensor(centers))
+        self.register_buffer('centers', nn.functional.softplus(th.FloatTensor(centers)))
 
         widths = th.FloatTensor([softplus_inverse((.5/((1.-np.exp(-cutoff))/K))**2)] * K)
-        self.widths = nn.functional.softplus(widths)
+        self.register_buffer('widths', nn.functional.softplus(widths))
 
     def cutoff_fn(self, D):
         x = D/self.cutoff
@@ -394,7 +408,12 @@ class PhysNetPretrain(PhysNet):
             num_residual_output=num_residual_output, drop_prob=drop_prob,
             activation_fn=activation_fn
         )
-        self.atom_classifier = AtomTypeClassifier(3, F, F, num_element)
+        self.hidden_size = F
+        self.atom_type_classifier = AtomTypeClassifier(3, F, F, num_element)
+        self.atom_pos_vae = VAE(F, F, 3)
+        self.atom_pos_linear = nn.Linear(F, 3)
+        self.mse_loss = nn.MSELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
 
     def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
                 short_idx_j=None, short_offsets=None):
@@ -412,5 +431,29 @@ class PhysNetPretrain(PhysNet):
         for i in range(self.num_blocks):
             x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
 
-        type_pred = self.atom_classifier(x)
-        return type_pred
+        type_pred = self.atom_type_classifier(x)
+        gaussians = th.rand((x.shape[0], self.hidden_size)).to(x.device)
+        atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, x)
+        pos_pred = self.atom_pos_linear(atom_pos_vae)
+        loss_type = self.ce_loss(type_pred, Z)
+        loss_pos = self.mse_loss(pos_pred, R)
+
+        return loss_type, loss_pos, loss_vae
+
+    def encode(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
+               short_idx_j=None, short_offsets=None):
+        D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
+        if short_idx_i is not None and short_idx_j is not None:
+            D_ij_short = self.calculate_interatom_distance(R, short_idx_i, short_idx_j, offsets=offsets)
+        else:
+            short_idx_i = idx_i
+            short_idx_j = idx_j
+            D_ij_short = D_ij_lr
+        
+        rbf = self.rbf_layer(D_ij_short)
+        x = self.atom_embedding(Z)
+
+        for i in range(self.num_blocks):
+            x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
+
+        return x
