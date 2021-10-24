@@ -1,3 +1,4 @@
+from invariant_point_attention.invariant_point_attention import IPATransformer
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +6,7 @@ import numpy as np
 import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
+from invariant_point_attention import InvariantPointAttention
 
 
 from nn_utils import *
@@ -365,6 +367,12 @@ class PhysNet(nn.Module):
         D_ij = th.sqrt(F.relu(th.sum((Ri-Rj)**2, -1)))
         return D_ij
 
+    def calculate_interatom_angle(self, R, idx_i, idx_j):
+        # in fact this calculates cosine(inter_atom_angle)
+        Ri = R[idx_i]
+        Rj = R[idx_j]
+
+
     def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
                 short_idx_j=None, short_offsets=None):
         D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
@@ -396,6 +404,7 @@ class PhysNetPretrain(PhysNet):
     def __init__(self, F=128, K=5, num_element=20, short_cutoff=10, long_cutoff=None,
                  num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
                  num_residual_output=1, drop_prob=0.5, activation_fn=shifted_softplus):
+        # physnet with atomwise attention
         super(PhysNetPretrain, self).__init__(
             F=F, K=K, num_element=num_element, short_cutoff=short_cutoff, long_cutoff=long_cutoff,
             num_blocks=num_blocks, num_residual_atom=num_residual_atom,
@@ -403,6 +412,8 @@ class PhysNetPretrain(PhysNet):
             num_residual_output=num_residual_output, drop_prob=drop_prob,
             activation_fn=activation_fn
         )
+        # invariant point attention
+        self.ipa_transformer = IPATransformer(dim=F, depth=5, require_pairwise_repr=False)
         self.hidden_size = F
         self.atom_type_classifier = AtomTypeClassifier(3, F, F, num_element)
         self.atom_pos_vae = VAE(F, F, 3)
@@ -419,16 +430,22 @@ class PhysNetPretrain(PhysNet):
             short_idx_i = idx_i
             short_idx_j = idx_j
             D_ij_short = D_ij_lr
-        
+ 
         rbf = self.rbf_layer(D_ij_short)
         x = self.atom_embedding(Z)
 
-        for i in range(self.num_blocks):
-            x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
+        xs = [x]
 
-        type_pred = self.atom_type_classifier(x)
-        gaussians = th.rand((x.shape[0], self.hidden_size)).to(x.device)
-        atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, x)
+        for i in range(self.num_blocks):
+            xs.append(self.interaction_blocks[i](xs[-1], rbf, short_idx_i, short_idx_j))
+
+        X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
+        X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
+        X = th.mean(X, dim=0) # mean pooling
+
+        type_pred = self.atom_type_classifier(X)
+        gaussians = th.rand((x.shape[0], self.hidden_size)).to(X.device)
+        atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, X)
         pos_pred = self.atom_pos_linear(atom_pos_vae)
         loss_type = self.ce_loss(type_pred, Z)
         loss_pos = self.mse_loss(pos_pred, R)
