@@ -33,7 +33,7 @@ def load_qm7_dataset(datafile):
     return new_Rs, new_Zs, Ds, Ts
 
 
-class QMDataset(Dataset):
+class QM7Dataset(Dataset):
     def __repr__(self):
          return "DataContainer"
     def __init__(self, filename):
@@ -162,7 +162,7 @@ class QMDataset(Dataset):
         return self.Z.shape[0]
 
     def __getitem__(self, idx):
-        if type(idx) is int or type(idx) is np.int64:
+        if isinstance(idx, int) or isinstance(idx, np.int64):
             idx = [idx]
 
         data = {'E':         [],
@@ -232,3 +232,16 @@ class QMDataset(Dataset):
                 data[k] = th.FloatTensor(v)
 
         return data
+
+    
+    class QM9Dataset(Dataset):
+        def __init__(self, filename) -> None:
+            super(QM9Dataset, self).__init__()
+            # use processed QM9 data
+            self.data, self.slices = th.load(filename)
+
+        def __len__(self):
+            return self.data.z.shape[0]
+
+        def __getitem__(self, index):
+            raise NotImplementedError
