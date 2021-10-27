@@ -55,7 +55,8 @@ def train(args):
         # dataset = dataset.cuda()
 
     for epoch in tqdm(range(args.num_epochs)):
-        loss_types, loss_poss, loss_vaes, losses = [], [], [], []
+        loss_atom_types, loss_bond_types, loss_bond_lengths, loss_bond_angles, \
+            loss_length_klds, loss_angle_klds, total_losses = [], [], [], [], [], [], []
         for data in dataset:
             model.zero_grad()
             Z, R, bonds, bond_types = data.z, data.pos, data.edge_index, data.edge_attr
@@ -85,28 +86,40 @@ def train(args):
                             # the major atom studies in the middle
                             ijk.add((u_bonds[u_i], u, u_bonds[u_j]))
             idx_ijk = th.LongTensor(list(ijk))
-            # only need half of this, from one-hot to class label {0,1,2,3}
-            bond_types = th.argmax(bond_types[:bond_types.shape[0]//2], dim=-1)
+            # use full to ensure invariance
+            bonds = bonds.transpose(1, 0)
+            # from one-hot to class label {0,1,2,3}
+            bond_types = th.argmax(bond_types, dim=-1)
             
             if args.cuda:
-                Z, R = Z.cuda(), R.cuda()
-            
-            loss_type, loss_pos, loss_vae = model(Z, R, idx_i, idx_j, idx_ijk, ij, bond_types)
+                Z, R, bond_types = Z.cuda(), R.cuda(), bond_types.cuda()
+ 
+            loss_atom_type, loss_bond_type, \
+            loss_bond_length, loss_bond_angle, \
+            loss_length_kld, loss_angle_kld = model(Z, R, idx_i, idx_j, idx_ijk, bonds, bond_types)
             # FIXME VAE loss learning schedule
-            loss = .5 * loss_pos + loss_type + .01 * loss_vae
-            loss.backward()
+            
+            total_loss = loss_bond_type + loss_atom_type + loss_bond_length * 0.5 + loss_bond_angle + \
+                   ((epoch//10+1)*0.07) * (loss_length_kld, loss_angle_kld)
+            total_loss.backward()
             optim.step()
 
-            loss_types.append(loss_type.detach().cpu().numpy())
-            loss_poss.append(loss_pos.detach().cpu().numpy())
-            loss_vaes.append(loss_vae.detach().cpu().numpy())
-            losses.append(loss.detach().cpu().numpy())
+            loss_atom_types.append(loss_atom_type.detach().cpu().numpy())
+            loss_bond_types.append(loss_bond_type.detach().cpu().numpy())
+            loss_bond_lengths.append(loss_bond_length.detach().cpu().numpy())
+            loss_bond_angles.append(loss_bond_angle.detach().cpu().numpy())
+            loss_length_klds.append(loss_length_kld.detach().cpu().numpy())
+            loss_angle_klds.append(loss_angle_kld.detach().cpu().numpy())
+            total_losses.append(total_loss.detach().cpu().numpy())
         
         total = len(dataset)
-        sw.add_scalar('Loss/Atom Type', sum(loss_types)/total, epoch)
-        sw.add_scalar('Loss/Atom Position', sum(loss_poss)/total, epoch)
-        sw.add_scalar('Loss/KLD', sum(loss_vaes)/total, epoch)
-        sw.add_scalar('Loss/Total', sum(losses)/total, epoch)
+        sw.add_scalar('Loss/Atom Type', sum(loss_atom_types)/total, epoch)
+        sw.add_scalar('Loss/Bond Type', sum(loss_bond_types)/total, epoch)
+        sw.add_scalar('Loss/Bond Length', sum(loss_bond_lengths)/total, epoch)
+        sw.add_scalar('Loss/Bond Angle', sum(loss_bond_angles)/total, epoch)
+        sw.add_scalar('Loss/Length KLD', sum(loss_length_klds)/total, epoch)
+        sw.add_scalar('Loss/Angle KLD', sum(loss_angle_klds)/total, epoch)
+        sw.add_scalar('Loss/Total', sum(total_losses)/total, epoch)
 
         if (epoch+1) % args.ckpt_step == 0:
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
