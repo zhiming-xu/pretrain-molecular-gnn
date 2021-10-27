@@ -1,4 +1,3 @@
-from invariant_point_attention.invariant_point_attention import IPATransformer
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +5,7 @@ import numpy as np
 import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
-from invariant_point_attention import InvariantPointAttention
+from invariant_point_attention import IPATransformer
 
 
 from nn_utils import *
