@@ -152,3 +152,6 @@ saved/
 # tensorboard log
 tensorboard/
 logs/
+
+# jupyter notebook
+*.ipynb
