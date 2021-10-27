@@ -421,7 +421,7 @@ class PhysNetPretrain(PhysNet):
         self.mse_loss = nn.MSELoss()
         self.ce_loss = nn.CrossEntropyLoss()
 
-    def forward(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
+    def forward(self, Z, R, idx_i, idx_j, idx_ijk, bonds, bond_types, offsets=None, short_idx_i=None,
                 short_idx_j=None, short_offsets=None):
         D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
         if short_idx_i is not None and short_idx_j is not None:
@@ -441,16 +441,19 @@ class PhysNetPretrain(PhysNet):
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
-        X = th.mean(X, dim=0) # mean pooling
+        X = th.max(X, dim=0) # max pooling
 
+        # predict atom type
         type_pred = self.atom_type_classifier(X)
+        loss_atom_type = self.ce_loss(type_pred, Z)
+        # predict bond type
+        # FIXME predict distance instead of coordinate
         gaussians = th.rand((x.shape[0], self.hidden_size)).to(X.device)
         atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, X)
         pos_pred = self.atom_pos_linear(atom_pos_vae)
-        loss_type = self.ce_loss(type_pred, Z)
         loss_pos = self.mse_loss(pos_pred, R)
 
-        return loss_type, loss_pos, loss_vae
+        return loss_atom_type, loss_pos, loss_vae
 
     def encode(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
                short_idx_j=None, short_offsets=None):
