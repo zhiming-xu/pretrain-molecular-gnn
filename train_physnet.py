@@ -7,6 +7,9 @@ import os
 import json
 from tqdm import tqdm
 from datetime import datetime
+from torch_geometric.datasets import QM9
+from torch_geometric.data import DataLoader
+from collections import defaultdict
 
 from data_utils import QM7Dataset
 from nn import PhysNetPretrain, PropertyPrediction
@@ -14,7 +17,7 @@ from nn import PhysNetPretrain, PropertyPrediction
 
 parser = ArgumentParser('PhysNet')
 parser.add_argument('-data_dir', type=str, default='data')
-parser.add_argument('-dataset', type=str, default='qm7_.mat')
+parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-train_batch_size', type=int, default=1)
 parser.add_argument('-ckpt_step', type=int, default=5)
 parser.add_argument('-ckpt_file', type=str)
@@ -37,7 +40,13 @@ def train(args):
         json.dump(vars(args), f)
     # save arguments
     data_file = os.path.join(args.data_dir, args.dataset)
-    dataset = QM7Dataset(data_file)
+
+    if args.dataset == 'qm7':
+        dataset = QM7Dataset(data_file)
+        raise DeprecationWarning('use QM9 instead')
+    elif args.dataset == 'qm9':
+        qm9 = QM9(args.data_dir)
+        dataset = DataLoader(qm9)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain()
     optim = SGD(model.parameters(), lr=args.lr)
@@ -49,11 +58,41 @@ def train(args):
         loss_types, loss_poss, loss_vaes, losses = [], [], [], []
         for data in dataset:
             model.zero_grad()
-            Z, R, idx_i, idx_j = data['Z'], data['R'], data['idx_i'], data['idx_j']
+            Z, R, bonds, bond_types = data.z, data.pos, data.edge_index, data.edge_attr
+            num_atoms = Z.shape[0]
+            # create idx_i and idx_j both of shape (n_atoms *(n_atoms-1))
+            idx_i = th.zeros(size=(num_atoms, num_atoms-1))
+            for i in range(num_atoms): idx_i[i] = i
+            idx_j = th.arange(num_atoms).repeat((num_atoms, 1))
+            for i in range(num_atoms): idx_j[i][i] = idx_j[i][-1]
+            idx_j = idx_j[:,:-1]
+            idx_i, idx_j = idx_i.long(), idx_j.long()
+            # create ijk, where j is the central atom, and j,k are those bonded to it
+            # j!= k, so they will form a bond angle
+            ij, _ = th.split(bonds, bonds.shape[1]//2, dim=1)
+            ij = ij.transpose(1, 0).tolist()
+            edge_dict = defaultdict(list)
+            for u, v in ij:
+                edge_dict[u].append(v)
+                edge_dict[v].append(u)
+
+            ijk = set()
+            for u, u_bonds in edge_dict.items():
+                if len(u_bonds) > 1:
+                    num_u_bonds = len(u_bonds)
+                    for u_i in range(num_u_bonds):
+                        for u_j in range(u_i+1, num_u_bonds):
+                            # the major atom studies in the middle
+                            ijk.add((u_bonds[u_i], u, u_bonds[u_j]))
+            idx_ijk = th.LongTensor(list(ijk))
+            # only need half of this, from one-hot to class label {0,1,2,3}
+            bond_types = th.argmax(bond_types[:bond_types.shape[0]//2], dim=-1)
+            
             if args.cuda:
                 Z, R = Z.cuda(), R.cuda()
-            loss_type, loss_pos, loss_vae = model(Z, R, idx_i, idx_j)
-
+            
+            loss_type, loss_pos, loss_vae = model(Z, R, idx_i, idx_j, idx_ijk, ij, bond_types)
+            # FIXME VAE loss learning schedule
             loss = .5 * loss_pos + loss_type + .01 * loss_vae
             loss.backward()
             optim.step()
