@@ -43,10 +43,10 @@ class AtomTypeGNN(nn.Module):
         return rst
 
 
-class AtomTypeClassifier(nn.Module):
+class MLPClassifier(nn.Module):
     '''Module for predicting central atom type based on neighbor information'''
     def __init__(self, num_layers, emb_size, hidden_size, num_types):
-        super(AtomTypeClassifier, self).__init__()
+        super(MLPClassifier, self).__init__()
         classifier = []
         assert(num_layers>1, '# of total layers must be larger than 1')
         for i in range(num_layers):
@@ -63,7 +63,18 @@ class AtomTypeClassifier(nn.Module):
         logits = self.classifier(h)
         return logits
 
-    
+
+class BilinearClassifier(MLPClassifier):
+    def __init__(self, num_layers, emb_size1, emb_size2, hidden_size, num_types, bias=False):
+        super(BilinearClassifier, self).__init__(num_layers-1, hidden_size, hidden_size, num_types)
+        self.bilinear = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
+
+    def forward(self, h1, h2):
+        h = self.bilinear(h1, h2)
+        logits = self.classifier(h)
+        return logits
+
+ 
 class AtomPosGNN(nn.Module):
     '''Module for message-passing in position prediction task'''
     def __init__(self, num_layers, hidden_size, atom_emb_size, pos_size=3):
@@ -111,6 +122,33 @@ class VAE(nn.Module):
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
 
 
+class BilinearVAE(VAE):
+    def __init__(self, emb_size1, emb_size2, hidden_size, num_layers, bias=False):
+        super(BilinearVAE, self).__init__(hidden_size, hidden_size, num_layers-1)
+        self.bilinear = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
+
+    def forward(self, gaussians, atom_repr1, atom_repr2):
+        h = self.bilinear(atom_repr1, atom_repr2)
+        mean = self.nn_mean(h)
+        logstd = self.nn_logstd(h)
+        return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
+
+
+class TrilinearVAE(VAE):
+    def __init__(self, emb_size1, emb_size2, hidden_size, num_layers, bias=False):
+        super(TrilinearVAE, self).__init__(hidden_size, hidden_size, num_layers-1)
+        self.bilinear1 = nn.Bilinear(emb_size1, emb_size2, hidden_size)
+        self.bilinear2 = nn.Bilinear(hidden_size, hidden_size, hidden_size)
+
+    def forward(self, gaussians, atom_repr1, atom_repr2, atom_repr3):
+        bond_repr1 = self.bilinear1(atom_repr1, atom_repr2)
+        bond_repr2 = self.bilinear1(atom_repr2, atom_repr3)
+        h = self.bilinear2(bond_repr1, bond_repr2)
+        mean = self.nn_mean(h)
+        logstd = self.nn_logstd(h)
+        return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
+
+
 class SSLMolecule(nn.Module):
     '''Module for self-supervised molecular representation learning'''
     def __init__(self, num_atom_types, atom_emb_size, dist_exp_size, hidden_size,
@@ -123,7 +161,7 @@ class SSLMolecule(nn.Module):
         # for pretraining task 1 - central atom type prediction based on
         # ditance expansion and atom embedding
         self.atom_type_gnn = AtomTypeGNN(dist_exp_size, atom_emb_size, hidden_size)
-        self.atom_classifier = AtomTypeClassifier(num_type_layers, hidden_size, hidden_size,
+        self.atom_classifier = MLPClassifier(num_type_layers, hidden_size, hidden_size,
                                                   num_atom_types)
         self.ce_loss = nn.CrossEntropyLoss()
         
@@ -401,7 +439,7 @@ class PhysNet(nn.Module):
 
 
 class PhysNetPretrain(PhysNet):
-    def __init__(self, F=128, K=5, num_element=20, short_cutoff=10, long_cutoff=None,
+    def __init__(self, F=128, K=5, num_element=20, num_bond=4, short_cutoff=10, long_cutoff=None,
                  num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
                  num_residual_output=1, drop_prob=0.5, activation_fn=shifted_softplus):
         # physnet with atomwise attention
@@ -415,11 +453,16 @@ class PhysNetPretrain(PhysNet):
         # invariant point attention
         self.ipa_transformer = IPATransformer(dim=F, depth=5, require_pairwise_repr=False)
         self.hidden_size = F
-        self.atom_type_classifier = AtomTypeClassifier(3, F, F, num_element)
-        self.atom_pos_vae = VAE(F, F, 3)
-        self.atom_pos_linear = nn.Linear(F, 3)
+        self.atom_type_classifier = MLPClassifier(3, F, F, num_element)
+        self.bond_type_classifier = BilinearClassifier(3, F, F, F, num_bond)
+        self.bond_length_vae = BilinearVAE(F, F, F, 3)
+        self.bond_length_linear = nn.Linear(F, 1)
+        self.bond_angle_vae = TrilinearVAE(F, F, F, 3)
+        self.bond_angle_linear = nn.Linear(F, 1)
         self.mse_loss = nn.MSELoss()
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.atom_ce_loss = nn.CrossEntropyLoss()
+        # FIXME add weight for bond type classification since single bonds are most common
+        self.bond_ce_loss = nn.CrossEntropyLoss()
 
     def forward(self, Z, R, idx_i, idx_j, idx_ijk, bonds, bond_types, offsets=None, short_idx_i=None,
                 short_idx_j=None, short_offsets=None):
@@ -441,19 +484,37 @@ class PhysNetPretrain(PhysNet):
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
-        X = th.max(X, dim=0) # max pooling
+        X, _ = th.max(X, dim=0) # max pooling
 
         # predict atom type
-        type_pred = self.atom_type_classifier(X)
-        loss_atom_type = self.ce_loss(type_pred, Z)
+        atom_type_pred = self.atom_type_classifier(X)
+        loss_atom_type = self.atom_ce_loss(atom_type_pred, Z)
         # predict bond type
-        # FIXME predict distance instead of coordinate
-        gaussians = th.rand((x.shape[0], self.hidden_size)).to(X.device)
-        atom_pos_vae, loss_vae = self.atom_pos_vae(gaussians, X)
-        pos_pred = self.atom_pos_linear(atom_pos_vae)
-        loss_pos = self.mse_loss(pos_pred, R)
+        bond_repr = X[bonds]
+        bond_type_pred = self.bond_type_classifier(bond_repr[:,0], bond_repr[:, 1])
+        loss_bond_type = self.bond_ce_loss(bond_type_pred, bond_types)
+        # predict bond length
+        gaussians = th.rand((bonds.shape[0], self.hidden_size)).to(X.device)
+        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1])
+        bond_length_pred = self.bond_length_linear(bond_length_h)
+        # FIXME no normalization on bond lengths is performed currently
+        loc = R[bonds]
+        bond_length = th.norm(loc[:,0]-loc[:,1], dim=-1)
+        loss_bond_length = self.mse_loss(bond_length_pred, bond_length)
+        # predict bond angle
+        bond_repr = X[idx_ijk]
+        gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
+        bond_angle_h, loss_angle_kld = self.bond_angle_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1], bond_repr[:,2])
+        bond_angle_pred = self.bond_angle_linear(bond_angle_h)
+        loc = R[idx_ijk]
+        vij = loc[:, 1] - loc[:, 0]
+        vik = loc[:, 1] - loc[:, 2]
+        bond_angle = th.acos(th.einsum('nk, nk->n', vij, vik)/th.norm(vij, dim=-1)/th.norm(vik, dim=-1))
+        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle)
+        # TODO dihedral angle (torsion)
 
-        return loss_atom_type, loss_pos, loss_vae
+        return loss_atom_type, loss_bond_type, loss_bond_length, \
+               loss_bond_angle, loss_length_kld, loss_angle_kld
 
     def encode(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
                short_idx_j=None, short_offsets=None):
