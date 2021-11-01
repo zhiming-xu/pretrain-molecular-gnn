@@ -127,7 +127,7 @@ class BilinearVAE(VAE):
         self.bilinear = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
 
     def forward(self, gaussians, atom_repr1, atom_repr2):
-        h = self.bilinear(atom_repr1, atom_repr2)
+        h = th.sigmoid(self.bilinear(atom_repr1, atom_repr2))
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
@@ -136,13 +136,13 @@ class BilinearVAE(VAE):
 class TrilinearVAE(VAE):
     def __init__(self, emb_size1, emb_size2, hidden_size, num_layers, bias=False):
         super(TrilinearVAE, self).__init__(hidden_size, hidden_size, num_layers-1)
-        self.bilinear1 = nn.Bilinear(emb_size1, emb_size2, hidden_size)
-        self.bilinear2 = nn.Bilinear(hidden_size, hidden_size, hidden_size)
+        self.bilinear1 = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
+        self.bilinear2 = nn.Bilinear(hidden_size, hidden_size, hidden_size, bias=bias)
 
     def forward(self, gaussians, atom_repr1, atom_repr2, atom_repr3):
-        bond_repr1 = self.bilinear1(atom_repr1, atom_repr2)
-        bond_repr2 = self.bilinear1(atom_repr2, atom_repr3)
-        h = self.bilinear2(bond_repr1, bond_repr2)
+        bond_repr1 = th.sigmoid(self.bilinear1(atom_repr1, atom_repr2))
+        bond_repr2 = th.sigmoid(self.bilinear1(atom_repr2, atom_repr3))
+        h = th.sigmoid(self.bilinear2(bond_repr1, bond_repr2))
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
@@ -455,9 +455,9 @@ class PhysNetPretrain(PhysNet):
         self.atom_type_classifier = MLPClassifier(3, F, F, num_element)
         self.bond_type_classifier = BilinearClassifier(3, F, F, F, num_bond)
         self.bond_length_vae = BilinearVAE(F, F, F, 3)
-        self.bond_length_linear = nn.Linear(F, 1)
+        self.bond_length_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
         self.bond_angle_vae = TrilinearVAE(F, F, F, 3)
-        self.bond_angle_linear = nn.Linear(F, 1)
+        self.bond_angle_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
         self.mse_loss = nn.MSELoss()
         self.atom_ce_loss = nn.CrossEntropyLoss()
         # FIXME add weight for bond type classification since single bonds are most common
@@ -499,7 +499,7 @@ class PhysNetPretrain(PhysNet):
         # FIXME no normalization on bond lengths is performed currently
         loc = R[bonds]
         bond_length = th.norm(loc[:,0]-loc[:,1], dim=-1)
-        loss_bond_length = self.mse_loss(bond_length_pred, bond_length)
+        loss_bond_length = self.mse_loss(bond_length_pred, bond_length.view(-1, 1))
         # predict bond angle
         bond_repr = X[idx_ijk]
         gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
@@ -508,8 +508,16 @@ class PhysNetPretrain(PhysNet):
         loc = R[idx_ijk]
         vij = loc[:, 1] - loc[:, 0]
         vik = loc[:, 1] - loc[:, 2]
-        bond_angle = th.acos(th.einsum('nk, nk->n', vij, vik)/th.norm(vij, dim=-1)/th.norm(vik, dim=-1))
-        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle)
+        bond_cos = th.einsum('nk, nk->n', vij, vik)/th.norm(vij, dim=-1)/th.norm(vik, dim=-1)
+        bond_cos = th.where(bond_cos<-1, -th.ones_like(bond_cos), bond_cos)
+        bond_cos = th.where(bond_cos>1, th.ones_like(bond_cos), bond_cos)
+        bond_angle = th.acos(bond_cos)
+        if not th.isnan(bond_angle).any():
+            # prevent nan in th.acos
+            loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle.view(-1, 1))
+        else:
+            loss_bond_angle = loss_bond_length
+            print('nan in bond angle, use bond length instead')
         # TODO dihedral angle (torsion)
 
         return loss_atom_type, loss_bond_type, loss_bond_length, \
@@ -528,9 +536,14 @@ class PhysNetPretrain(PhysNet):
         rbf = self.rbf_layer(D_ij_short)
         x = self.atom_embedding(Z)
 
+        xs = [x]
+
         for i in range(self.num_blocks):
-            x = self.interaction_blocks[i](x, rbf, short_idx_i, short_idx_j)
+            xs.append(self.interaction_blocks[i](xs[-1], rbf, short_idx_i, short_idx_j))
 
-        return x
+        X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
+        X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
+        X, _ = th.max(X, dim=0) # max pooling
 
+        return X
 

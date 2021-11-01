@@ -8,7 +8,7 @@ import json
 from tqdm import tqdm
 from datetime import datetime
 from torch_geometric.datasets import QM9
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from collections import defaultdict
 
 from data_utils import QM7Dataset
@@ -19,8 +19,9 @@ parser = ArgumentParser('PhysNet')
 parser.add_argument('-data_dir', type=str, default='data')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-train_batch_size', type=int, default=1)
-parser.add_argument('-ckpt_step', type=int, default=5)
+parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
+parser.add_argument('-pretrain_size', type=int, default=30000)
 parser.add_argument('-num_epochs', type=int, default=100)
 parser.add_argument('-lr', type=float, default=1e-3)
 parser.add_argument('-cuda', action='store_true')
@@ -46,7 +47,8 @@ def train(args):
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
         qm9 = QM9(args.data_dir)
-        dataset = DataLoader(qm9)
+        idx = th.randperm(len(qm9))[:args.pretrain_size]
+        dataset = DataLoader(qm9[idx])
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain()
     optim = SGD(model.parameters(), lr=args.lr)
@@ -57,7 +59,7 @@ def train(args):
     for epoch in tqdm(range(args.num_epochs)):
         loss_atom_types, loss_bond_types, loss_bond_lengths, loss_bond_angles, \
             loss_length_klds, loss_angle_klds, total_losses = [], [], [], [], [], [], []
-        for data in dataset:
+        for sample_idx, data in tqdm(enumerate(dataset), leave=False):
             model.zero_grad()
             Z, R, bonds, bond_types = data.z, data.pos, data.edge_index, data.edge_attr
             num_atoms = Z.shape[0]
@@ -70,12 +72,10 @@ def train(args):
             idx_i, idx_j = idx_i.long(), idx_j.long()
             # create ijk, where j is the central atom, and j,k are those bonded to it
             # j!= k, so they will form a bond angle
-            ij, _ = th.split(bonds, bonds.shape[1]//2, dim=1)
-            ij = ij.transpose(1, 0).tolist()
+            ij = bonds.transpose(1, 0)
             edge_dict = defaultdict(list)
             for u, v in ij:
-                edge_dict[u].append(v)
-                edge_dict[v].append(u)
+                edge_dict[u.item()].append(v.item())
 
             ijk = set()
             for u, u_bonds in edge_dict.items():
@@ -100,7 +100,7 @@ def train(args):
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + loss_bond_length * 0.5 + loss_bond_angle + \
-                   ((epoch//10+1)*0.07) * (loss_length_kld, loss_angle_kld)
+                   ((epoch//10+1)*0.07) * (loss_length_kld + loss_angle_kld)
             total_loss.backward()
             optim.step()
 
@@ -111,7 +111,14 @@ def train(args):
             loss_length_klds.append(loss_length_kld.detach().cpu().numpy())
             loss_angle_klds.append(loss_angle_kld.detach().cpu().numpy())
             total_losses.append(total_loss.detach().cpu().numpy())
-        
+            sw.add_scalar('Debug/Atom Type', loss_atom_type, sample_idx)
+            sw.add_scalar('Debug/Bond Type', loss_bond_type, sample_idx)
+            sw.add_scalar('Debug/Bond Length', loss_bond_length, sample_idx)
+            sw.add_scalar('Debug/Bond Angle', loss_bond_angle, sample_idx)
+            sw.add_scalar('Debug/Length KLD', loss_length_kld, sample_idx)
+            sw.add_scalar('Debug/Angle KLD', loss_angle_kld, sample_idx)
+            sw.add_scalar('Debug/Total', total_loss, sample_idx)
+
         total = len(dataset)
         sw.add_scalar('Loss/Atom Type', sum(loss_atom_types)/total, epoch)
         sw.add_scalar('Loss/Bond Type', sum(loss_bond_types)/total, epoch)
