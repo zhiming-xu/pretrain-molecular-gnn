@@ -91,12 +91,14 @@ def pretrain(args):
             D_exp = dist_exp(D)
  
             loss_atom_pred, loss_pos_pred, loss_vae = model(R, A, D_exp, Z)
+            '''
             loss = weight_l1 * (loss_atom_pred + loss_pos_pred/5) + \
                    weight_l2 * (epoch//20) * loss_vae
-             # temporary workout to gradually increase kl loss weight
+            # temporary workout to gradually increase kl loss weight
             if loss_atom_pred > 10 or loss_pos_pred > 120:
                 continue
-
+            '''
+            loss = loss_pos_pred
             loss.backward()
             optimizer.step()
             
@@ -112,7 +114,7 @@ def pretrain(args):
         sw.add_scalar('Loss/Total', sum(losses)/total, epoch)
 
         if (epoch+1) % args.ckpt_step == 0:
-            th.save(model.state_dict(), f'logs/{args.running_id}/epoch_%d.th' % epoch)
+            th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
 def pred(args):

@@ -13,13 +13,13 @@ from torch_geometric.loader import DataLoader
 from collections import defaultdict
 
 from data_utils import QM7Dataset, DistanceAndPlanarAngle
-from nn import PhysNetPretrain, PropertyPrediction
+from nn import PhysNetInteractionMsgPassing, PhysNetPretrain, PropertyPrediction
 
 
 parser = ArgumentParser('PhysNet')
 parser.add_argument('-data_dir', type=str, default='data')
 parser.add_argument('-dataset', type=str, default='qm9')
-parser.add_argument('-train_batch_size', type=int, default=1)
+parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_size', type=int, default=30000)
@@ -50,8 +50,7 @@ def train(args):
         qm9 = QM9(args.data_dir, transform=Compose(
             [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
-        idx = th.randperm(len(qm9))[:args.pretrain_size]
-        dataset = DataLoader(qm9[idx], batch_size=32)
+        dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain()
     optim = SGD(model.parameters(), lr=args.lr)
@@ -64,42 +63,12 @@ def train(args):
             loss_length_klds, loss_angle_klds, total_losses = [], [], [], [], [], [], []
         for sample_idx, data in tqdm(enumerate(dataset), leave=False):
             model.zero_grad()
-            Z, R, bonds, bond_types = data.z, data.pos, data.edge_index, data.edge_attr
-            num_atoms = Z.shape[0]
-            # create idx_i and idx_j both of shape (n_atoms *(n_atoms-1))
-            idx_i = th.zeros(size=(num_atoms, num_atoms-1))
-            for i in range(num_atoms): idx_i[i] = i
-            idx_j = th.arange(num_atoms).repeat((num_atoms, 1))
-            for i in range(num_atoms): idx_j[i][i] = idx_j[i][-1]
-            idx_j = idx_j[:,:-1]
-            idx_i, idx_j = idx_i.long(), idx_j.long()
-            # create ijk, where j is the central atom, and j,k are those bonded to it
-            # j!= k, so they will form a bond angle
-            ij = bonds.transpose(1, 0)
-            edge_dict = defaultdict(list)
-            for u, v in ij:
-                edge_dict[u.item()].append(v.item())
-
-            ijk = set()
-            for u, u_bonds in edge_dict.items():
-                if len(u_bonds) > 1:
-                    num_u_bonds = len(u_bonds)
-                    for u_i in range(num_u_bonds):
-                        for u_j in range(u_i+1, num_u_bonds):
-                            # the major atom studies in the middle
-                            ijk.add((u_bonds[u_i], u, u_bonds[u_j]))
-            idx_ijk = th.LongTensor(list(ijk))
-            # use full to ensure invariance
-            bonds = bonds.transpose(1, 0)
-            # from one-hot to class label {0,1,2,3}
-            bond_types = th.argmax(bond_types, dim=-1)
+            Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle = data.z, data.pos, data.idx_ijk, \
+                data.edge_index, data.bond_type, data.bond_length, data.bond_angle
             
-            if args.cuda:
-                Z, R, bond_types = Z.cuda(), R.cuda(), bond_types.cuda()
- 
             loss_atom_type, loss_bond_type, \
             loss_bond_length, loss_bond_angle, \
-            loss_length_kld, loss_angle_kld = model(Z, R, idx_i, idx_j, idx_ijk, bonds, bond_types)
+            loss_length_kld, loss_angle_kld = model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle)
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + loss_bond_length * 0.5 + loss_bond_angle + \
