@@ -7,11 +7,12 @@ import os
 import json
 from tqdm import tqdm
 from datetime import datetime
+from torch_geometric.transforms import Compose, ToDevice
 from torch_geometric.datasets import QM9
 from torch_geometric.loader import DataLoader
 from collections import defaultdict
 
-from data_utils import QM7Dataset
+from data_utils import QM7Dataset, DistanceAndPlanarAngle
 from nn import PhysNetPretrain, PropertyPrediction
 
 
@@ -46,9 +47,11 @@ def train(args):
         dataset = QM7Dataset(data_file)
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
-        qm9 = QM9(args.data_dir)
+        qm9 = QM9(args.data_dir, transform=Compose(
+            [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
+        ))
         idx = th.randperm(len(qm9))[:args.pretrain_size]
-        dataset = DataLoader(qm9[idx])
+        dataset = DataLoader(qm9[idx], batch_size=32)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain()
     optim = SGD(model.parameters(), lr=args.lr)
