@@ -321,7 +321,7 @@ class PhysNetInteractionLayer(nn.Module):
 
 
 class PhysNetInteractionMsgPassing(MessagePassing):
-    def __init__(self, K, F, num_residual, activation_fn=None, drop_prob=.5):
+    def __init__(self, K, F, num_inter_residual, num_atom_residual, activation_fn=None, drop_prob=.5):
         super().__init__(aggr='add')
         self.activation_fn = activation_fn
         self.dropout = nn.Dropout(drop_prob)
@@ -330,10 +330,13 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         self.dense_i = nn.Linear(F, F)
         self.dense_j = nn.Linear(F, F)
         self.residuals = nn.ModuleList()
-        for _ in range(num_residual):
+        for _ in range(num_inter_residual):
             self.residuals.append(ResidualLayer(F, F, activation_fn, drop_prob))
         self.dense = nn.Linear(F, F) 
         self.u = nn.Parameter(th.rand(F))
+        self.residuals = nn.ModuleList()
+        for _ in range(num_atom_residual):
+            self.residuals.append(ResidualLayer(F, F, activation_fn=activation_fn, drop_prob=drop_prob))
 
     def forward(self, atom_embs, edge_indices, pos):
         if self.activation_fn:
@@ -357,6 +360,10 @@ class PhysNetInteractionMsgPassing(MessagePassing):
             m = self.activation_fn(m)
         
         new_repr_i = self.u * atom_repr_i + self.dense(m)
+
+        for layer in self.residuals:
+            new_repr_i = layer(new_repr_i)
+
         return new_repr_i
 
 
@@ -480,16 +487,16 @@ class PhysNet(nn.Module):
 
 
 class PhysNetPretrain(nn.Module):
-    def __init__(self, F=128, K=5, num_elements=20, num_bond=4, short_cutoff=10, long_cutoff=None,
-                 num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
-                 num_residual_output=1, drop_prob=0.5, activation_fn=shifted_softplus):
+    def __init__(self, F=128, K=5, num_elements=20, num_bond=4, num_blocks=5, num_atom_residual=2,
+                 num_inter_residual=2, drop_prob=0.5, activation_fn=shifted_softplus):
+        super(PhysNetPretrain, self).__init__()
         # physnet with atomwise attention
         self.num_blocks = num_blocks
         self.atom_embedding = nn.Embedding(num_elements, F)
-        self.interaction_layers = nn.ModuleList()
+        self.interaction_blocks = nn.ModuleList()
         for _ in range(num_blocks):
-            self.interaction_layers.append(
-                PhysNetInteractionMsgPassing(K, F, num_residual_interaction, shifted_softplus, drop_prob)
+            self.interaction_blocks.append(
+                PhysNetInteractionMsgPassing(K, F, num_inter_residual, num_atom_residual, activation_fn, drop_prob)
             )
         # invariant point attention
         self.ipa_transformer = IPATransformer(dim=F, depth=5, require_pairwise_repr=False)
@@ -521,20 +528,20 @@ class PhysNetPretrain(nn.Module):
         loss_atom_type = self.atom_ce_loss(atom_type_pred, Z)
         # predict bond type
         bond_repr = X[bonds]
-        bond_type_pred = self.bond_type_classifier(bond_repr[:,0], bond_repr[:, 1])
+        bond_type_pred = self.bond_type_classifier(bond_repr[0,:], bond_repr[1,:])
         loss_bond_type = self.bond_ce_loss(bond_type_pred, bond_type)
         # predict bond length
-        gaussians = th.rand((bonds.shape[0], self.hidden_size)).to(X.device)
-        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1])
+        gaussians = th.rand((bonds.shape[1], self.hidden_size)).to(X.device)
+        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, bond_repr[0,:], bond_repr[1,:])
         bond_length_pred = self.bond_length_linear(bond_length_h)
         # FIXME no normalization on bond lengths is performed currently
         loss_bond_length = self.mse_loss(bond_length_pred, bond_length)
         # predict bond angle
         bond_repr = X[idx_ijk]
         gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
-        bond_angle_h, loss_angle_kld = self.bond_angle_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1], bond_repr[:,2])
+        bond_angle_h, loss_angle_kld = self.bond_angle_vae(gaussians, bond_repr[:,0], bond_repr[:,1], bond_repr[:,2])
         bond_angle_pred = self.bond_angle_linear(bond_angle_h)
-        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle.view(-1, 1))
+        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle)
         # TODO dihedral angle (torsion)
 
         return loss_atom_type, loss_bond_type, loss_bond_length, \
