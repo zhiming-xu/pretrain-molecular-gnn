@@ -6,6 +6,7 @@ import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
+from torch_geometric.nn import MessagePassing
 
 
 from nn_utils import *
@@ -319,6 +320,46 @@ class PhysNetInteractionLayer(nn.Module):
         return x
 
 
+class PhysNetInteractionMsgPassing(MessagePassing):
+    def __init__(self, K, F, num_residual, activation_fn=None, drop_prob=.5):
+        super().__init__(aggr='add')
+        self.activation_fn = activation_fn
+        self.dropout = nn.Dropout(drop_prob)
+        self.rbf = PhysNetRBFLayer(cutoff=10., K=K)
+        self.k2f = nn.Linear(K, F, bias=False)
+        self.dense_i = nn.Linear(F, F)
+        self.dense_j = nn.Linear(F, F)
+        self.residuals = nn.ModuleList()
+        for _ in range(num_residual):
+            self.residuals.append(ResidualLayer(F, F, activation_fn, drop_prob))
+        self.dense = nn.Linear(F, F) 
+        self.u = nn.Parameter(th.rand(F))
+
+    def forward(self, atom_embs, edge_indices, pos):
+        if self.activation_fn:
+            atom_embs = self.dropout(self.activation_fn(atom_embs))
+        else:
+            atom_embs = self.dropout(atom_embs)
+        
+        return self.propagate(edge_indices, atom_embs=atom_embs, pos=pos)
+
+    def message(self, atom_embs_i, atom_embs_j, pos_i, pos_j):
+        atom_repr_i = self.dense_i(atom_embs_i)
+        dist = th.norm(pos_j-pos_i, dim=-1)
+        g = self.k2f(self.rbf(dist))
+        atom_repr_j = g * self.dense_j(atom_embs_j)
+        m = atom_repr_i + atom_repr_j
+
+        for layer in self.residuals:
+            m = layer(m)
+        
+        if self.activation_fn:
+            m = self.activation_fn(m)
+        
+        new_repr_i = self.u * atom_repr_i + self.dense(m)
+        return new_repr_i
+
+
 class PhysNetRBFLayer(nn.Module):
     def __init__(self, cutoff, K):
         super(PhysNetRBFLayer, self).__init__()
@@ -338,7 +379,8 @@ class PhysNetRBFLayer(nn.Module):
         return th.where(x<1, 1 - 6*x5 + 15*x4 - 10*x3, th.zeros_like(x))
 
     def forward(self, D):
-        D = th.unsqueeze(D, -1)
+        if D.shape[-1] != 1:
+            D = th.unsqueeze(D, -1)
         rbf = self.cutoff_fn(D) * th.exp(-self.widths*(th.exp(-D)-self.centers)**2)
         return rbf
 
@@ -437,22 +479,22 @@ class PhysNet(nn.Module):
         return E_total, Q_total, nhloss
 
 
-class PhysNetPretrain(PhysNet):
-    def __init__(self, F=128, K=5, num_element=20, num_bond=4, short_cutoff=10, long_cutoff=None,
+class PhysNetPretrain(nn.Module):
+    def __init__(self, F=128, K=5, num_elements=20, num_bond=4, short_cutoff=10, long_cutoff=None,
                  num_blocks=5, num_residual_atom=2, num_residual_interaction=2,
                  num_residual_output=1, drop_prob=0.5, activation_fn=shifted_softplus):
         # physnet with atomwise attention
-        super(PhysNetPretrain, self).__init__(
-            F=F, K=K, num_element=num_element, short_cutoff=short_cutoff, long_cutoff=long_cutoff,
-            num_blocks=num_blocks, num_residual_atom=num_residual_atom,
-            num_residual_interaction=num_residual_interaction,
-            num_residual_output=num_residual_output, drop_prob=drop_prob,
-            activation_fn=activation_fn
-        )
+        self.num_blocks = num_blocks
+        self.atom_embedding = nn.Embedding(num_elements, F)
+        self.interaction_layers = nn.ModuleList()
+        for _ in range(num_blocks):
+            self.interaction_layers.append(
+                PhysNetInteractionMsgPassing(K, F, num_residual_interaction, shifted_softplus, drop_prob)
+            )
         # invariant point attention
         self.ipa_transformer = IPATransformer(dim=F, depth=5, require_pairwise_repr=False)
         self.hidden_size = F
-        self.atom_type_classifier = MLPClassifier(3, F, F, num_element)
+        self.atom_type_classifier = MLPClassifier(3, F, F, num_elements)
         self.bond_type_classifier = BilinearClassifier(3, F, F, F, num_bond)
         self.bond_length_vae = BilinearVAE(F, F, F, 3)
         self.bond_length_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
@@ -463,23 +505,12 @@ class PhysNetPretrain(PhysNet):
         # FIXME add weight for bond type classification since single bonds are most common
         self.bond_ce_loss = nn.CrossEntropyLoss()
 
-    def forward(self, Z, R, idx_i, idx_j, idx_ijk, bonds, bond_types, offsets=None, short_idx_i=None,
-                short_idx_j=None, short_offsets=None):
-        D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
-        if short_idx_i is not None and short_idx_j is not None:
-            D_ij_short = self.calculate_interatom_distance(R, short_idx_i, short_idx_j, offsets=offsets)
-        else:
-            short_idx_i = idx_i
-            short_idx_j = idx_j
-            D_ij_short = D_ij_lr
- 
-        rbf = self.rbf_layer(D_ij_short)
+    def forward(self, Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle):
         x = self.atom_embedding(Z)
-
         xs = [x]
 
         for i in range(self.num_blocks):
-            xs.append(self.interaction_blocks[i](xs[-1], rbf, short_idx_i, short_idx_j))
+            xs.append(self.interaction_blocks[i](xs[-1], bonds, R))
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
@@ -491,59 +522,34 @@ class PhysNetPretrain(PhysNet):
         # predict bond type
         bond_repr = X[bonds]
         bond_type_pred = self.bond_type_classifier(bond_repr[:,0], bond_repr[:, 1])
-        loss_bond_type = self.bond_ce_loss(bond_type_pred, bond_types)
+        loss_bond_type = self.bond_ce_loss(bond_type_pred, bond_type)
         # predict bond length
         gaussians = th.rand((bonds.shape[0], self.hidden_size)).to(X.device)
         bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1])
         bond_length_pred = self.bond_length_linear(bond_length_h)
         # FIXME no normalization on bond lengths is performed currently
-        loc = R[bonds]
-        bond_length = th.norm(loc[:,0]-loc[:,1], dim=-1)
-        loss_bond_length = self.mse_loss(bond_length_pred, bond_length.view(-1, 1))
+        loss_bond_length = self.mse_loss(bond_length_pred, bond_length)
         # predict bond angle
         bond_repr = X[idx_ijk]
         gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
         bond_angle_h, loss_angle_kld = self.bond_angle_vae(gaussians, bond_repr[:, 0], bond_repr[:, 1], bond_repr[:,2])
         bond_angle_pred = self.bond_angle_linear(bond_angle_h)
-        loc = R[idx_ijk]
-        vij = loc[:, 1] - loc[:, 0]
-        vik = loc[:, 1] - loc[:, 2]
-        bond_cos = th.einsum('nk, nk->n', vij, vik)/th.norm(vij, dim=-1)/th.norm(vik, dim=-1)
-        bond_cos = th.where(bond_cos<-1, -th.ones_like(bond_cos), bond_cos)
-        bond_cos = th.where(bond_cos>1, th.ones_like(bond_cos), bond_cos)
-        bond_angle = th.acos(bond_cos)
-        if not th.isnan(bond_angle).any():
-            # prevent nan in th.acos
-            loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle.view(-1, 1))
-        else:
-            loss_bond_angle = loss_bond_length
-            print('nan in bond angle, use bond length instead')
+        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle.view(-1, 1))
         # TODO dihedral angle (torsion)
 
         return loss_atom_type, loss_bond_type, loss_bond_length, \
                loss_bond_angle, loss_length_kld, loss_angle_kld
 
-    def encode(self, Z, R, idx_i, idx_j, offsets=None, short_idx_i=None,
-               short_idx_j=None, short_offsets=None):
-        D_ij_lr = self.calculate_interatom_distance(R, idx_i, idx_j, offsets=offsets)
-        if short_idx_i is not None and short_idx_j is not None:
-            D_ij_short = self.calculate_interatom_distance(R, short_idx_i, short_idx_j, offsets=offsets)
-        else:
-            short_idx_i = idx_i
-            short_idx_j = idx_j
-            D_ij_short = D_ij_lr
-        
-        rbf = self.rbf_layer(D_ij_short)
+    def encode(self, Z, R, bonds):
         x = self.atom_embedding(Z)
 
         xs = [x]
 
         for i in range(self.num_blocks):
-            xs.append(self.interaction_blocks[i](xs[-1], rbf, short_idx_i, short_idx_j))
+            xs.append(self.interaction_blocks[i](xs[-1], bonds, R))
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
         X, _ = th.max(X, dim=0) # max pooling
 
         return X
-
