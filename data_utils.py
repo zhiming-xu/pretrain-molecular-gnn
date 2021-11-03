@@ -2,6 +2,7 @@ import scipy.io as si
 import numpy as np
 import torch as th
 from torch.utils.data import Dataset
+from torch_geometric.transforms import BaseTransform
 
 
 z2id = {1:0, 6: 1, 7:2, 8:3, 16: 4}
@@ -233,15 +234,37 @@ class QM7Dataset(Dataset):
 
         return data
 
-    
-    class QM9Dataset(Dataset):
-        def __init__(self, filename) -> None:
-            super(QM9Dataset, self).__init__()
-            # use processed QM9 data
-            self.data, self.slices = th.load(filename)
 
-        def __len__(self):
-            return self.data.z.shape[0]
-
-        def __getitem__(self, index):
-            raise NotImplementedError
+class DistanceAndPlanarAngle(BaseTransform):
+    def __init__(self) -> None:
+       super().__init__()
+        
+    def __call__(self, data):
+        # calculate bond angle
+        (src, dst), pos = data.edge_index, data.pos
+        adj_atoms = {}
+        for s, d in zip(src, dst):
+            if s.item() not in adj_atoms:
+                adj_atoms[s.item()] = [d.item()]
+            else:
+                adj_atoms[s.item()].append(d.item())
+        ijk = []
+        for u, vs in adj_atoms.items():
+            if len(vs) > 1:
+                for i in range(len(vs)):
+                    for j in range(i+1, len(vs)):
+                        ijk.append([vs[i], u, vs[j]])
+        ijk = th.LongTensor(ijk)
+        loc = pos[ijk]
+        vij = loc[:, 1] - loc[:, 0]
+        vik = loc[:, 1] - loc[:, 2]
+        bond_cos = (vij*vik).sum(dim=-1, keepdims=True)/th.norm(vij, dim=-1, keepdim=True) \
+                                                       /th.norm(vik, dim=-1, keepdim=True)
+        bond_cos = th.where(bond_cos<-1, -th.ones_like(bond_cos), bond_cos)
+        bond_cos = th.where(bond_cos>1, th.ones_like(bond_cos), bond_cos)
+        bond_angle = th.acos(bond_cos)
+        data.idx_ijk, data.bond_angle = ijk, bond_angle
+        # calculate bond length
+        dist = th.norm(pos[src] - pos[dst], p=2, dim=-1).view(-1, 1)
+        data.bond_length = dist
+        return data
