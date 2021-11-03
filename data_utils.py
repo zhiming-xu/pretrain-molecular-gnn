@@ -267,4 +267,5 @@ class DistanceAndPlanarAngle(BaseTransform):
         # calculate bond length
         dist = th.norm(pos[src] - pos[dst], p=2, dim=-1).view(-1, 1)
         data.bond_length = dist
+        data.bond_type = th.argmax(data.edge_attr, dim=1)
         return data
