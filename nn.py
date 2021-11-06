@@ -223,20 +223,20 @@ class DistanceExpansion(nn.Module):
 
 
 class PropertyPrediction(nn.Module):
-    def __init__(self, input_size, hidden_size=32, num_layers=3):
+    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=19, reduction='none'):
         super(PropertyPrediction, self).__init__()
         W = nn.Parameter(th.rand(input_size))
         b = nn.Parameter(th.rand(input_size))
         self.register_parameter('W', W)
         self.register_parameter('b', b)
-        self.loss = nn.L1Loss()
+        self.loss = nn.L1Loss(reduction=reduction)
 
         nets = []
         for i in range(num_layers):
             if i == 0:
                 nets.append(nn.Linear(input_size, hidden_size))
             elif i == num_layers - 1:
-                nets.append(nn.Linear(hidden_size, 1))
+                nets.append(nn.Linear(hidden_size, target_size))
                 # break # don't apply softplus for the last layer
             else:
                 nets.append(nn.Linear(hidden_size, hidden_size))
@@ -244,8 +244,8 @@ class PropertyPrediction(nn.Module):
         
         self.nn = nn.Sequential(*nets)
     
-    def forward(self, x, target):
-        h = th.einsum('nf,f->f', x, self.W) + self.b
+    def forward(self, x, molecule_idx, target):
+        h = th.stack([th.einsum('nf,f->f', x[molecule_idx==i], self.W) + self.b for i in range(max(molecule_idx)+1)])
         h = self.nn(h)
         return self.loss(h, target)
 
