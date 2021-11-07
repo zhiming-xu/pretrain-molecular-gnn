@@ -152,9 +152,9 @@ def pred(args):
                 h = pretrain_model.encode(Z, R, bonds)
                 loss = pred_model(h, molecule_idx, data.y)
                 loss.mean().backward()
-                train_losses.append(loss.detach().cpu().mean(dim=0))
                 optimizer1.step()
                 optimizer2.step()
+                train_losses.append(loss.detach().cpu().mean(dim=0))
             else:
                 with th.no_grad():
                     h = pretrain_model.encode(Z, R, bonds)
