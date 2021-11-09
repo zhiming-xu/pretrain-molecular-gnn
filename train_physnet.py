@@ -142,7 +142,7 @@ def pred(args):
         train_losses, test_losses = [], []
         cnt = 0
         for data in tqdm(dataset, leave=False):
-            Z, R, bonds = data.z, data.pos, data.edge_index
+            Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
             molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
             molecule_idx = molecule_idx.long()
 
@@ -150,7 +150,7 @@ def pred(args):
                 pretrain_model.zero_grad()
                 pred_model.zero_grad()
                 h = pretrain_model.encode(Z, R, bonds)
-                loss = pred_model(h, molecule_idx, data.y)
+                loss = pred_model(h, molecule_idx, target)
                 loss.mean().backward()
                 optimizer1.step()
                 optimizer2.step()
@@ -158,7 +158,7 @@ def pred(args):
             else:
                 with th.no_grad():
                     h = pretrain_model.encode(Z, R, bonds)
-                    loss = pred_model(h, molecule_idx, data.y)
+                    loss = pred_model(h, molecule_idx, target)
                     test_losses.append(loss.detach().cpu().mean(dim=0))
             cnt += 1
 

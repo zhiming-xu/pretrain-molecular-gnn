@@ -329,6 +329,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         self.k2f = nn.Linear(K, F, bias=False)
         self.dense_i = nn.Linear(F, F)
         self.dense_j = nn.Linear(F, F)
+        self.att = AtomwiseMsgPassingAttention(F)
         self.residuals = nn.ModuleList()
         for _ in range(num_inter_residual):
             self.residuals.append(ResidualLayer(F, F, activation_fn, drop_prob))
@@ -350,7 +351,9 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         atom_repr_i = self.dense_i(atom_embs_i)
         dist = th.norm(pos_j-pos_i, dim=-1)
         g = self.k2f(self.rbf(dist))
-        atom_repr_j = g * self.dense_j(atom_embs_j)
+        atom_repr_j = self.dense_j(atom_embs_j)
+        att_weight = self.att(atom_repr_i, atom_repr_j, ptr)
+        atom_repr_j = g * att_weight * atom_repr_j
         m = atom_repr_i + atom_repr_j
 
         for layer in self.residuals:
@@ -365,6 +368,17 @@ class PhysNetInteractionMsgPassing(MessagePassing):
             new_repr_i = layer(new_repr_i)
 
         return new_repr_i
+
+
+class AtomwiseMsgPassingAttention(nn.Module):
+    def __init__(self, F):
+        super().__init__()
+        self.linear = nn.Linear(F, F, bias=False)
+    
+    def forward(self, atom_repr_i, atom_repr_j, ptr):
+        att_weight = th.sum(self.linear(atom_repr_i)*self.linear(atom_repr_j), dim=-1)
+        att_weight = th.cat(th.softmax(att_weight)[ptr[i]:ptr[i+1]] for i in range(ptr.shape[0]-1))
+        return att_weight.unsqueeze(dim=-1)
 
 
 class PhysNetRBFLayer(nn.Module):
@@ -547,13 +561,13 @@ class PhysNetPretrain(nn.Module):
         return loss_atom_type, loss_bond_type, loss_bond_length, \
                loss_bond_angle, loss_length_kld, loss_angle_kld
 
-    def encode(self, Z, R, bonds):
+    def encode(self, Z, R, bonds, ptr):
         x = self.atom_embedding(Z)
 
         xs = [x]
 
         for i in range(self.num_blocks):
-            xs.append(self.interaction_blocks[i](xs[-1], bonds, R))
+            xs.append(self.interaction_blocks[i](xs[-1], bonds, R, ptr))
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
