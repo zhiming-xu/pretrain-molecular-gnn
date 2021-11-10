@@ -118,7 +118,7 @@ def pred(args):
         qm9 = QM9(args.data_dir, transform=Compose(
             [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
-        qm9.data.y = (qm9.data.y-qm9.data.y.mean(dim=0)) / qm9.data.y.std(dim=0)
+        # qm9.data.y = (qm9.data.y-qm9.data.y.mean(dim=0)) / qm9.data.y.std(dim=0)
         dataset = DataLoader(qm9, batch_size=args.pred_batch_size)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     pretrain_model = PhysNetPretrain()
