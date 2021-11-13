@@ -1,9 +1,10 @@
 import torch as th
-from torch.optim.sgd import SGD
+from torch.optim import Adam, SGD
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from argparse import ArgumentParser
 import os
+import re
 import json
 from tqdm import tqdm
 from datetime import datetime
@@ -31,6 +32,8 @@ parser.add_argument('-pred_batch_size', type=int, default=128)
 parser.add_argument('-hidden_size', type=int, default=128)
 parser.add_argument('-num_pred_layers', type=int, default=3)
 parser.add_argument('-pred_epochs', type=int, default=200)
+parser.add_argument('-resume', action='store_true')
+parser.add_argument('-resume_ckpt', type=str)
 
 
 def train(args):
@@ -119,6 +122,7 @@ def pred(args):
             [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
         # qm9.data.y = (qm9.data.y-qm9.data.y.mean(dim=0)) / qm9.data.y.std(dim=0)
+        qm9.data.y = qm9.data.y[:,:12] # only use the first 12 targets
         dataset = DataLoader(qm9, batch_size=args.pred_batch_size)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     pretrain_model = PhysNetPretrain()
@@ -126,18 +130,19 @@ def pred(args):
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
     input_size = 128
-    pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers)
+    pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers, target_size=12)
+    if args.resume:
+        pred_model.load_state_dict(th.load(args.resume_ckpt))
 
     if args.cuda:
         pretrain_model = pretrain_model.cuda()
         pred_model = pred_model.cuda()
 
-    optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
-    optimizer2 = SGD(pred_model.parameters(), lr=1e-3)
+    # optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
+    optimizer2 = Adam(pred_model.parameters(), lr=3e-3)
 
     total = len(dataset)
     num_train = round(total * args.pred_train_ratio)
-    num_test = total - num_train
     for epoch in tqdm(range(args.pred_epochs)):
         train_losses, test_losses = [], []
         cnt = 0
@@ -145,14 +150,13 @@ def pred(args):
             Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
             molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
             molecule_idx = molecule_idx.long()
-
-            if cnt < num_train:
-                pretrain_model.zero_grad()
-                pred_model.zero_grad()
+            with th.no_grad():
                 h = pretrain_model.encode(Z, R, bonds)
-                loss = pred_model(h, molecule_idx, target)
+            if cnt < num_train:
+                pred_model.zero_grad()
+                loss = pred_model(h, molecule_idx, data.y)
                 loss.mean().backward()
-                optimizer1.step()
+                # optimizer1.step()
                 optimizer2.step()
                 train_losses.append(loss.detach().cpu().mean(dim=0))
             else:
@@ -164,9 +168,34 @@ def pred(args):
 
         train_losses = th.stack(train_losses)
         test_losses = th.stack(test_losses)
-        for i in range(train_losses.shape[-1]):
-            sw.add_scalar('Prediction/Train target #%s' % i, train_losses[:,i].mean(), epoch)
-            sw.add_scalar('Prediction/Test target #%s' % i, test_losses[:,i].mean(), epoch)
+        
+        sw.add_scalar('Prediction/Train μ', train_losses[:,0].mean(), epoch)
+        sw.add_scalar('Prediction/Train α', train_losses[:,1].mean(), epoch)
+        sw.add_scalar('Prediction/Train ε_HOMO', test_losses[:,2].mean(), epoch)
+        sw.add_scalar('Prediction/Train ε_LUMO', test_losses[:,3].mean(), epoch)
+        sw.add_scalar('Prediction/Train Δε', test_losses[:,4].mean(), epoch)
+        sw.add_scalar('Prediction/Train <R>²', test_losses[:,5].mean(), epoch)
+        sw.add_scalar('Prediction/Train ZPVE²', test_losses[:,6].mean(), epoch)
+        sw.add_scalar('Prediction/Train U_0', test_losses[:,7].mean(), epoch)
+        sw.add_scalar('Prediction/Train U', test_losses[:,8].mean(), epoch)
+        sw.add_scalar('Prediction/Train H', test_losses[:,9].mean(), epoch)
+        sw.add_scalar('Prediction/Train G', test_losses[:,10].mean(), epoch)
+        sw.add_scalar('Prediction/Train c_v', test_losses[:,11].mean(), epoch)
+        sw.add_scalar('Prediction/Test μ', train_losses[:,0].mean(), epoch)
+        sw.add_scalar('Prediction/Test α', train_losses[:,1].mean(), epoch)
+        sw.add_scalar('Prediction/Test ε_HOMO', test_losses[:,2].mean(), epoch)
+        sw.add_scalar('Prediction/Test ε_LUMO', test_losses[:,3].mean(), epoch)
+        sw.add_scalar('Prediction/Test Δε', test_losses[:,4].mean(), epoch)
+        sw.add_scalar('Prediction/Test <R>²', test_losses[:,5].mean(), epoch)
+        sw.add_scalar('Prediction/Test ZPVE²', test_losses[:,6].mean(), epoch)
+        sw.add_scalar('Prediction/Test U_0', test_losses[:,7].mean(), epoch)
+        sw.add_scalar('Prediction/Test U', test_losses[:,8].mean(), epoch)
+        sw.add_scalar('Prediction/Test H', test_losses[:,9].mean(), epoch)
+        sw.add_scalar('Prediction/Test G', test_losses[:,10].mean(), epoch)
+        sw.add_scalar('Prediction/Test c_v', test_losses[:,11].mean(), epoch)
+
+        if (epoch+1) % args.ckpt_step == 0:
+            th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/epoch_%d.th' % epoch)
 
 
 def main():
