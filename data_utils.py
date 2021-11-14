@@ -298,7 +298,6 @@ class DistanceAndPlanarAngle(BaseTransform):
             # the torsion is supplementary to the angles calculated
             data.torsion = th.FloatTensor([np.pi]) - dihedral_angle
             luvk = th.stack([ls, us, vs, ks], dim=-1)
-            data.planes = luvk
-        else:
-            data.torsion = None
+            data.plane = luvk
+        
         return data
