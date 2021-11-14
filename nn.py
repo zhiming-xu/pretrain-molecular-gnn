@@ -555,7 +555,7 @@ class PhysNetPretrain(nn.Module):
         # FIXME add weight for bond type classification since single bonds are most common
         self.bond_ce_loss = nn.CrossEntropyLoss()
 
-    def forward(self, Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle, planes, torsion_angle):
+    def forward(self, Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle, plane, torsion):
         x = self.atom_embedding(Z)
         xs = [x]
 
@@ -588,13 +588,13 @@ class PhysNetPretrain(nn.Module):
         bond_angle_pred = self.bond_angle_linear(bond_angle_h)
         loss_bond_angle = self.mae_loss(bond_angle_pred, bond_angle)
         # TODO check dihedral angle (torsion) implementation
-        atom_reprs = X[planes]
-        gaussians = th.rand((planes.shape[0], self.hidden_size)).to(X.device)
+        atom_reprs = X[plane]
+        gaussians = th.rand((plane.shape[0], self.hidden_size)).to(X.device)
         torsion_h, loss_torsion_kld = self.torsion_vae(
             gaussians, atom_reprs[:,0], atom_reprs[:, 1], atom_reprs[:, 2], atom_reprs[:, 3]
         )
         torsion_pred = self.torsion_linear(torsion_h)
-        loss_torsion = self.mae_loss(torsion_pred, torsion_angle)
+        loss_torsion = self.mae_loss(torsion_pred, torsion)
 
         return loss_atom_type, loss_bond_type, \
                loss_bond_length, loss_bond_angle, loss_torsion, \
