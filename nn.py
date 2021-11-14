@@ -64,13 +64,23 @@ class MLPClassifier(nn.Module):
         return logits
 
 
-class BilinearClassifier(MLPClassifier):
-    def __init__(self, num_layers, emb_size1, emb_size2, hidden_size, num_types, bias=False):
-        super(BilinearClassifier, self).__init__(num_layers-1, hidden_size, hidden_size, num_types)
-        self.bilinear = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
+class DualEmb(nn.Module):
+    def __init__(self, emb_size, hidden_size, bias=False):
+        self.linear = nn.Linear(emb_size, hidden_size, bias=bias)
 
     def forward(self, h1, h2):
-        h = self.bilinear(h1, h2)
+        h1 = self.linear(h1)
+        h2 = self.linear(h2)
+        return th.cat([h1 * h2, h1 + h2], dim=-1)
+
+
+class BilinearClassifier(MLPClassifier):
+    def __init__(self, num_layers, emb_size, hidden_size, num_types, bias=False):
+        super(BilinearClassifier, self).__init__(num_layers-1, hidden_size*2, hidden_size, num_types)
+        self.dual_emb = DualEmb(emb_size, hidden_size)
+
+    def forward(self, h1, h2):
+        h = self.dual_emb(h1, h2)
         logits = self.classifier(h)
         return logits
 
@@ -122,28 +132,45 @@ class VAE(nn.Module):
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
 
 
-class BilinearVAE(VAE):
-    def __init__(self, emb_size1, emb_size2, hidden_size, num_layers, bias=False):
-        super(BilinearVAE, self).__init__(hidden_size, hidden_size, num_layers-1)
-        self.bilinear = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
+class DualVAE(VAE):
+    def __init__(self, emb_size, hidden_size, num_layers, bias=False):
+        super(DualVAE, self).__init__(hidden_size*2, hidden_size, num_layers-1)
+        self.dual_emb = DualEmb(emb_size, hidden_size, bias=bias)
 
     def forward(self, gaussians, atom_repr1, atom_repr2):
-        h = th.sigmoid(self.bilinear(atom_repr1, atom_repr2))
+        h = self.dual_emb(atom_repr1, atom_repr1)
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
 
 
-class TrilinearVAE(VAE):
-    def __init__(self, emb_size1, emb_size2, hidden_size, num_layers, bias=False):
-        super(TrilinearVAE, self).__init__(hidden_size, hidden_size, num_layers-1)
-        self.bilinear1 = nn.Bilinear(emb_size1, emb_size2, hidden_size, bias=bias)
-        self.bilinear2 = nn.Bilinear(hidden_size, hidden_size, hidden_size, bias=bias)
+class TriVAE(VAE):
+    def __init__(self, emb_size, hidden_size, num_layers, bias=False):
+        super(TriVAE, self).__init__(hidden_size*2, hidden_size, num_layers-1)
+        self.dual_emb1 = DualEmb(emb_size, hidden_size, bias=bias)
+        self.dual_emb2 = DualEmb(hidden_size*2, hidden_size, bias=bias)
 
     def forward(self, gaussians, atom_repr1, atom_repr2, atom_repr3):
-        bond_repr1 = th.sigmoid(self.bilinear1(atom_repr1, atom_repr2))
-        bond_repr2 = th.sigmoid(self.bilinear1(atom_repr2, atom_repr3))
-        h = th.sigmoid(self.bilinear2(bond_repr1, bond_repr2))
+        h1 = self.dual_emb1(atom_repr1, atom_repr2)
+        h2 = self.dual_emb1(atom_repr2, atom_repr3)
+        h = self.dual_emb2(h1, h2)
+        mean = self.nn_mean(h)
+        logstd = self.nn_logstd(h)
+        return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
+
+
+class QuadVAE(VAE):
+    def __init__(self, emb_size, hidden_size, num_layers, bias=False):
+        super(QuadVAE, self).__init__(hidden_size*2, hidden_size, num_layers-1)
+        self.dual_emb_uv = DualEmb(emb_size, hidden_size, bias=bias)
+        self.bilinar = nn.Bilinear(emb_size, hidden_size*2, hidden_size, bias=bias)
+        self.dual_emb_all = DualEmb(hidden_size, hidden_size, bias=bias)
+
+    def forward(self, gaussians, h_l, h_u, h_v, h_k):
+        h_uv = self.dual_emb_uv(h_u, h_v)
+        h_luv = self.bilinar(h_l, h_uv)
+        h_uvk = self.bilinar(h_k, h_uv)
+        h = self.dual_emb_all(h_luv, h_uvk)
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
@@ -352,7 +379,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         dist = th.norm(pos_j-pos_i, dim=-1)
         g = self.k2f(self.rbf(dist))
         atom_repr_j = self.dense_j(atom_embs_j)
-        att_weight = self.att(atom_repr_i, atom_repr_j, ptr)
+        att_weight = self.att(atom_repr_i, atom_repr_j)
         atom_repr_j = g * att_weight * atom_repr_j
         m = atom_repr_i + atom_repr_j
 
@@ -516,17 +543,19 @@ class PhysNetPretrain(nn.Module):
         self.ipa_transformer = IPATransformer(dim=F, depth=5, require_pairwise_repr=False)
         self.hidden_size = F
         self.atom_type_classifier = MLPClassifier(3, F, F, num_elements)
-        self.bond_type_classifier = BilinearClassifier(3, F, F, F, num_bond)
-        self.bond_length_vae = BilinearVAE(F, F, F, 3)
+        self.bond_type_classifier = BilinearClassifier(3, F, F, num_bond)
+        self.bond_length_vae = DualVAE(F, F, 3)
         self.bond_length_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
-        self.bond_angle_vae = TrilinearVAE(F, F, F, 3)
+        self.bond_angle_vae = TriVAE(F, F, 3)
         self.bond_angle_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
-        self.mse_loss = nn.MSELoss()
+        self.torsion_vae = QuadVAE(F, F, 3)
+        self.torsion_linear = nn.Sequential(nn.Linear(F, 1), nn.Softplus())
+        self.mae_loss = nn.L1Loss()
         self.atom_ce_loss = nn.CrossEntropyLoss()
         # FIXME add weight for bond type classification since single bonds are most common
         self.bond_ce_loss = nn.CrossEntropyLoss()
 
-    def forward(self, Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle):
+    def forward(self, Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle, planes, torsion_angle):
         x = self.atom_embedding(Z)
         xs = [x]
 
@@ -541,25 +570,35 @@ class PhysNetPretrain(nn.Module):
         atom_type_pred = self.atom_type_classifier(X)
         loss_atom_type = self.atom_ce_loss(atom_type_pred, Z)
         # predict bond type
-        bond_repr = X[bonds]
-        bond_type_pred = self.bond_type_classifier(bond_repr[0,:], bond_repr[1,:])
+        atom_reprs = X[bonds]
+        bond_type_pred = self.bond_type_classifier(atom_reprs[0,:], atom_reprs[1,:])
         loss_bond_type = self.bond_ce_loss(bond_type_pred, bond_type)
         # predict bond length
         gaussians = th.rand((bonds.shape[1], self.hidden_size)).to(X.device)
-        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, bond_repr[0,:], bond_repr[1,:])
+        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, atom_reprs[0,:], atom_reprs[1,:])
         bond_length_pred = self.bond_length_linear(bond_length_h)
         # FIXME no normalization on bond lengths is performed currently
-        loss_bond_length = self.mse_loss(bond_length_pred, bond_length)
+        loss_bond_length = self.mae_loss(bond_length_pred, bond_length)
         # predict bond angle
-        bond_repr = X[idx_ijk]
+        atom_reprs = X[idx_ijk]
         gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
-        bond_angle_h, loss_angle_kld = self.bond_angle_vae(gaussians, bond_repr[:,0], bond_repr[:,1], bond_repr[:,2])
+        bond_angle_h, loss_angle_kld = self.bond_angle_vae(
+            gaussians, atom_reprs[:,0], atom_reprs[:,1], atom_reprs[:,2]
+        )
         bond_angle_pred = self.bond_angle_linear(bond_angle_h)
-        loss_bond_angle = self.mse_loss(bond_angle_pred, bond_angle)
-        # TODO dihedral angle (torsion)
+        loss_bond_angle = self.mae_loss(bond_angle_pred, bond_angle)
+        # TODO check dihedral angle (torsion) implementation
+        atom_reprs = X[planes]
+        gaussians = th.rand((planes.shape[0], self.hidden_size)).to(X.device)
+        torsion_h, loss_torsion_kld = self.torsion_vae(
+            gaussians, atom_reprs[:,0], atom_reprs[:, 1], atom_reprs[:, 2], atom_reprs[:, 3]
+        )
+        torsion_pred = self.torsion_linear(torsion_h)
+        loss_torsion = self.mae_loss(torsion_pred, torsion_angle)
 
         return loss_atom_type, loss_bond_type, loss_bond_length, \
-               loss_bond_angle, loss_length_kld, loss_angle_kld
+               loss_bond_angle, loss_length_kld, loss_angle_kld, \
+               loss_torsion, loss_torsion_kld
 
     def encode(self, Z, R, bonds, ptr):
         x = self.atom_embedding(Z)
