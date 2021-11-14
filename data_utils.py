@@ -299,5 +299,12 @@ class DistanceAndPlanarAngle(BaseTransform):
             data.torsion = th.FloatTensor([np.pi]) - dihedral_angle
             luvk = th.stack([ls, us, vs, ks], dim=-1)
             data.plane = luvk
+        else:
+            # FIXME: some molecules don't have torsion, need to process this case in collate_fn
+            # dummy placeholder to avoid no torsion case
+            data.torsion = th.FloatTensor([[0]])
+            data.plane = th.LongTensor([[0,1,2,0]])
+            # data.torsion = None
+            # data.plane = None
         
         return data
