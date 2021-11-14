@@ -52,9 +52,9 @@ def train(args):
         qm9 = QM9(args.data_dir, transform=Compose(
             [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
-        dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=True)
+        dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
-    model = PhysNetPretrain()
+    model = PhysNetPretrain(F=args.hidden_size)
     optim = SGD(model.parameters(), lr=args.lr)
     if args.cuda:
         model = model.cuda()
@@ -79,7 +79,7 @@ def train(args):
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + \
-                loss_bond_length + loss_bond_angle +  loss_torsion, \
+                loss_bond_length + loss_bond_angle +  loss_torsion + \
                 ((epoch//3+1)*0.07) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss.backward()
             optim.step()
