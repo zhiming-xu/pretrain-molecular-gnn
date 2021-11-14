@@ -242,6 +242,7 @@ class DistanceAndPlanarAngle(BaseTransform):
     def __call__(self, data):
         # calculate bond angle
         (src, dst), pos = data.edge_index, data.pos
+        # prepare the (i,j,k) triplet for bond angle
         adj_atoms = {}
         for s, d in zip(src, dst):
             if s.item() not in adj_atoms:
@@ -264,8 +265,40 @@ class DistanceAndPlanarAngle(BaseTransform):
         bond_cos = th.where(bond_cos>1, th.ones_like(bond_cos), bond_cos)
         bond_angle = th.acos(bond_cos)
         data.idx_ijk, data.bond_angle = ijk, bond_angle
-        # calculate bond length
+        # prepare bond length
         dist = th.norm(pos[src] - pos[dst], p=2, dim=-1).view(-1, 1)
         data.bond_length = dist
         data.bond_type = th.argmax(data.edge_attr, dim=1)
+        # prepare dihedral angle
+        bridges = data.edge_index.transpose(1, 0).tolist()
+        ls, us, vs, ks = [], [], [], []
+        for u, v in bridges:
+            for l in adj_atoms[u]:
+                for k in adj_atoms[v]:
+                    if l != v and k != u and l != k:
+                        ls.append(l)
+                        us.append(u)
+                        vs.append(v)
+                        ks.append(k)
+        if ls:
+            ls = th.LongTensor(ls)
+            us = th.LongTensor(us)
+            vs = th.LongTensor(vs)
+            ks = th.LongTensor(ks)
+            vec_lus = pos[ls] - pos[us]
+            vec_uvs = pos[us] - pos[vs]
+            vec_vks = pos[vs] - pos[ks]
+            o1 = th.cross(vec_lus, vec_uvs)
+            o2 = th.cross(vec_uvs, vec_vks)
+            dihedral_cos = (o1 * o2).sum(dim=-1, keepdim=True)/\
+                           th.norm(o1, dim=-1, keepdim=True) / th.norm(o2, dim=-1, keepdim=True)
+            dihedral_cos = th.where(dihedral_cos<-1, -th.ones_like(dihedral_cos), dihedral_cos)
+            dihedral_cos = th.where(dihedral_cos>1, th.ones_like(dihedral_cos), dihedral_cos)
+            dihedral_angle = th.acos(dihedral_cos)
+            # the torsion is supplementary to the angles calculated
+            data.torsion = th.FloatTensor([np.pi]) - dihedral_angle
+            luvk = th.stack([ls, us, vs, ks], dim=-1)
+            data.planes = luvk
+        else:
+            data.torsion = None
         return data
