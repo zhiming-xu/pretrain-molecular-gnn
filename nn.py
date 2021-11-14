@@ -66,6 +66,7 @@ class MLPClassifier(nn.Module):
 
 class DualEmb(nn.Module):
     def __init__(self, emb_size, hidden_size, bias=False):
+        super().__init__()
         self.linear = nn.Linear(emb_size, hidden_size, bias=bias)
 
     def forward(self, h1, h2):
@@ -110,7 +111,7 @@ class AtomPosGNN(nn.Module):
 class VAE(nn.Module):
     '''Module for variational autoencoder'''
     def __init__(self, emb_size, hidden_size, num_layers):
-        super(VAE, self).__init__()
+        super().__init__()
         nn_mean, nn_logstd = [], []
         self.kld_loss = lambda mean, logstd: -0.5 * th.sum(1 + logstd - mean.square() - logstd.exp())
         for i in range(num_layers):
@@ -119,10 +120,10 @@ class VAE(nn.Module):
                 nn_logstd.append(nn.Linear(emb_size, hidden_size))
             else:
                 nn_mean.append(nn.Linear(hidden_size, hidden_size))
-                nn_logstd.append(nn.Linear(emb_size, hidden_size))
+                nn_logstd.append(nn.Linear(hidden_size, hidden_size))
             nn_mean.append(nn.Softplus())
             nn_logstd.append(nn.Softplus())
-        
+ 
         self.nn_mean = nn.Sequential(*nn_mean)
         self.nn_logstd = nn.Sequential(*nn_logstd)
 
@@ -138,7 +139,7 @@ class DualVAE(VAE):
         self.dual_emb = DualEmb(emb_size, hidden_size, bias=bias)
 
     def forward(self, gaussians, atom_repr1, atom_repr2):
-        h = self.dual_emb(atom_repr1, atom_repr1)
+        h = self.dual_emb(atom_repr1, atom_repr2)
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
         return mean + gaussians * th.exp(0.5 * logstd), self.kld_loss(mean, logstd)
@@ -163,13 +164,13 @@ class QuadVAE(VAE):
     def __init__(self, emb_size, hidden_size, num_layers, bias=False):
         super(QuadVAE, self).__init__(hidden_size*2, hidden_size, num_layers-1)
         self.dual_emb_uv = DualEmb(emb_size, hidden_size, bias=bias)
-        self.bilinar = nn.Bilinear(emb_size, hidden_size*2, hidden_size, bias=bias)
-        self.dual_emb_all = DualEmb(hidden_size, hidden_size, bias=bias)
+        self.reduce = nn.Linear(hidden_size*2, hidden_size, bias=bias)
+        self.dual_emb_all = DualEmb(hidden_size*2, hidden_size, bias=bias)
 
     def forward(self, gaussians, h_l, h_u, h_v, h_k):
-        h_uv = self.dual_emb_uv(h_u, h_v)
-        h_luv = self.bilinar(h_l, h_uv)
-        h_uvk = self.bilinar(h_k, h_uv)
+        h_uv = self.reduce(self.dual_emb_uv(h_u, h_v))
+        h_luv = th.cat([h_uv * h_l, h_uv + h_l], dim=-1)
+        h_uvk = th.cat([h_uv * h_k, h_uv + h_k], dim=-1)
         h = self.dual_emb_all(h_luv, h_uvk)
         mean = self.nn_mean(h)
         logstd = self.nn_logstd(h)
@@ -379,8 +380,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         dist = th.norm(pos_j-pos_i, dim=-1)
         g = self.k2f(self.rbf(dist))
         atom_repr_j = self.dense_j(atom_embs_j)
-        att_weight = self.att(atom_repr_i, atom_repr_j)
-        atom_repr_j = g * att_weight * atom_repr_j
+        atom_repr_j = g * atom_repr_j
         m = atom_repr_i + atom_repr_j
 
         for layer in self.residuals:
