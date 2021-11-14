@@ -52,7 +52,7 @@ def train(args):
         qm9 = QM9(args.data_dir, transform=Compose(
             [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
-        dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size)
+        dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=True)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain()
     optim = SGD(model.parameters(), lr=args.lr)
@@ -61,20 +61,24 @@ def train(args):
         # dataset = dataset.cuda()
 
     for epoch in tqdm(range(args.num_epochs)):
-        loss_atom_types, loss_bond_types, loss_bond_lengths, loss_bond_angles, \
-            loss_length_klds, loss_angle_klds, total_losses = [], [], [], [], [], [], []
+        loss_atom_types, loss_bond_types, \
+        loss_bond_lengths, loss_bond_angles, loss_torsions, \
+        loss_length_klds, loss_angle_klds, loss_torsion_klds, \
+        total_losses = [], [], [], [], [], [], [], []
         for batch_idx, data in enumerate(tqdm(dataset, leave=False)):
             model.zero_grad()
             Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle = data.z, data.pos, data.idx_ijk, \
                 data.edge_index, data.bond_type, data.bond_length, data.bond_angle
             
             loss_atom_type, loss_bond_type, \
-            loss_bond_length, loss_bond_angle, \
-            loss_length_kld, loss_angle_kld = model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle)
+            loss_bond_length, loss_bond_angle, loss_torsion, \
+            loss_length_kld, loss_angle_kld, loss_torsion_kld = \
+                model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle)
             # FIXME VAE loss learning schedule
             
-            total_loss = loss_bond_type + loss_atom_type + loss_bond_length * 0.5 + loss_bond_angle + \
-                   ((epoch//10+1)*0.07) * (loss_length_kld + loss_angle_kld)
+            total_loss = loss_bond_type + loss_atom_type + \
+                loss_bond_length * 0.5 + loss_bond_angle +  loss_torsion, \
+                ((epoch//3+1)*0.07) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss.backward()
             optim.step()
 
@@ -82,16 +86,20 @@ def train(args):
             loss_bond_types.append(loss_bond_type.detach().cpu().numpy())
             loss_bond_lengths.append(loss_bond_length.detach().cpu().numpy())
             loss_bond_angles.append(loss_bond_angle.detach().cpu().numpy())
+            loss_torsions.append(loss_torsion.detach().cpu().numpy())
             loss_length_klds.append(loss_length_kld.detach().cpu().numpy())
             loss_angle_klds.append(loss_angle_kld.detach().cpu().numpy())
+            loss_torsion_klds.append(loss_torsion_kld.detach().cpu().numpy())
             total_losses.append(total_loss.detach().cpu().numpy())
             # for DEBUG
             sw.add_scalar('Debug/Atom Type', loss_atom_type, batch_idx)
             sw.add_scalar('Debug/Bond Type', loss_bond_type, batch_idx)
             sw.add_scalar('Debug/Bond Length', loss_bond_length, batch_idx)
             sw.add_scalar('Debug/Bond Angle', loss_bond_angle, batch_idx)
+            sw.add_scalar('Debug/Torsion', loss_torsion, batch_idx)
             sw.add_scalar('Debug/Length KLD', loss_length_kld, batch_idx)
             sw.add_scalar('Debug/Angle KLD', loss_angle_kld, batch_idx)
+            sw.add_scalar('Debug/Torsion KLD', loss_torsion_kld, batch_idx)
             sw.add_scalar('Debug/Total', total_loss, batch_idx)
  
         total = len(dataset)
@@ -99,8 +107,10 @@ def train(args):
         sw.add_scalar('Loss/Bond Type', sum(loss_bond_types)/total, epoch)
         sw.add_scalar('Loss/Bond Length', sum(loss_bond_lengths)/total, epoch)
         sw.add_scalar('Loss/Bond Angle', sum(loss_bond_angles)/total, epoch)
+        sw.add_scalar('Loss/Torsion', sum(loss_torsions)/total, epoch)
         sw.add_scalar('Loss/Length KLD', sum(loss_length_klds)/total, epoch)
         sw.add_scalar('Loss/Angle KLD', sum(loss_angle_klds)/total, epoch)
+        sw.add_scalar('Loss/Torsion KLD', sum(loss_torsion_klds)/total, epoch)
         sw.add_scalar('Loss/Total', sum(total_losses)/total, epoch)
 
         if (epoch+1) % args.ckpt_step == 0:
@@ -139,7 +149,7 @@ def pred(args):
         pred_model = pred_model.cuda()
 
     # optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
-    optimizer2 = Adam(pred_model.parameters(), lr=3e-3)
+    optimizer2 = Adam(pred_model.parameters(), lr=3e-4)
 
     total = len(dataset)
     num_train = round(total * args.pred_train_ratio)
