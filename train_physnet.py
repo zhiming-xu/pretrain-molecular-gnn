@@ -64,20 +64,22 @@ def train(args):
         loss_atom_types, loss_bond_types, \
         loss_bond_lengths, loss_bond_angles, loss_torsions, \
         loss_length_klds, loss_angle_klds, loss_torsion_klds, \
-        total_losses = [], [], [], [], [], [], [], []
+        total_losses = [], [], [], [], [], [], [], [], []
         for batch_idx, data in enumerate(tqdm(dataset, leave=False)):
             model.zero_grad()
-            Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle = data.z, data.pos, data.idx_ijk, \
-                data.edge_index, data.bond_type, data.bond_length, data.bond_angle
+            Z, R, idx_ijk, bonds, \
+                bond_type, bond_length, bond_angle, plane, torsion = \
+            data.z, data.pos, data.idx_ijk, data.edge_index, \
+                data.bond_type, data.bond_length, data.bond_angle, data.plane, data.torsion
             
             loss_atom_type, loss_bond_type, \
             loss_bond_length, loss_bond_angle, loss_torsion, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle)
+                model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle, plane, torsion)
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + \
-                loss_bond_length * 0.5 + loss_bond_angle +  loss_torsion, \
+                loss_bond_length + loss_bond_angle +  loss_torsion, \
                 ((epoch//3+1)*0.07) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss.backward()
             optim.step()
