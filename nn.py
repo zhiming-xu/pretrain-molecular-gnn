@@ -596,9 +596,9 @@ class PhysNetPretrain(nn.Module):
         torsion_pred = self.torsion_linear(torsion_h)
         loss_torsion = self.mae_loss(torsion_pred, torsion_angle)
 
-        return loss_atom_type, loss_bond_type, loss_bond_length, \
-               loss_bond_angle, loss_length_kld, loss_angle_kld, \
-               loss_torsion, loss_torsion_kld
+        return loss_atom_type, loss_bond_type, \
+               loss_bond_length, loss_bond_angle, loss_torsion, \
+               loss_length_kld, loss_angle_kld, loss_torsion_kld
 
     def encode(self, Z, R, bonds, ptr):
         x = self.atom_embedding(Z)
