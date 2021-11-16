@@ -22,7 +22,7 @@ parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
-parser.add_argument('-num_epochs', type=int, default=100)
+parser.add_argument('-pretrain_epochs', type=int, default=50)
 parser.add_argument('-lr', type=float, default=1e-3)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
@@ -60,7 +60,7 @@ def train(args):
         model = model.cuda()
         # dataset = dataset.cuda()
 
-    for epoch in tqdm(range(args.num_epochs)):
+    for epoch in tqdm(range(args.pretrain_epochs)):
         loss_atom_types, loss_bond_types, \
         loss_bond_lengths, loss_bond_angles, loss_torsions, \
         loss_length_klds, loss_angle_klds, loss_torsion_klds, \
