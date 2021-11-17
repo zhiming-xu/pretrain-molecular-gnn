@@ -251,7 +251,7 @@ class DistanceExpansion(nn.Module):
 
 
 class PropertyPrediction(nn.Module):
-    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=19, reduction='none'):
+    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=1, reduction='none'):
         super(PropertyPrediction, self).__init__()
         W = nn.Parameter(th.rand(input_size))
         b = nn.Parameter(th.rand(input_size))
@@ -268,7 +268,7 @@ class PropertyPrediction(nn.Module):
                 # break # don't apply softplus for the last layer
             else:
                 nets.append(nn.Linear(hidden_size, hidden_size))
-            nets.append(nn.Tanh())
+            nets.append(nn.Softplus())
         
         self.nn = nn.Sequential(*nets)
     
