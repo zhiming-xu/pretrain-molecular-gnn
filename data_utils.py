@@ -295,8 +295,12 @@ class DistanceAndPlanarAngle(BaseTransform):
             dihedral_cos = th.where(dihedral_cos<-1, -th.ones_like(dihedral_cos), dihedral_cos)
             dihedral_cos = th.where(dihedral_cos>1, th.ones_like(dihedral_cos), dihedral_cos)
             dihedral_angle = th.acos(dihedral_cos)
+            # some molecules are linear, such as HC≡CH, the cross product will be zero vector
+            # and the cos will be nan
+            dihedral_angle = th.where(th.isnan(dihedral_angle), th.zeros_like(dihedral_angle), dihedral_angle)
             # the torsion is supplementary to the angles calculated
             data.torsion = th.FloatTensor([np.pi]) - dihedral_angle
+            
             luvk = th.stack([ls, us, vs, ks], dim=-1)
             data.plane = luvk
         else:
