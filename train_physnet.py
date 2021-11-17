@@ -55,7 +55,7 @@ def train(args):
         dataset = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PhysNetPretrain(F=args.hidden_size)
-    optim = SGD(model.parameters(), lr=args.lr)
+    optim = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         model = model.cuda()
         # dataset = dataset.cuda()

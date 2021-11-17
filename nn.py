@@ -7,7 +7,7 @@ import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
 from torch_geometric.nn import MessagePassing
-
+th.manual_seed(42)
 
 from nn_utils import *
 
@@ -190,7 +190,7 @@ class SSLMolecule(nn.Module):
         # ditance expansion and atom embedding
         self.atom_type_gnn = AtomTypeGNN(dist_exp_size, atom_emb_size, hidden_size)
         self.atom_classifier = MLPClassifier(num_type_layers, hidden_size, hidden_size,
-                                                  num_atom_types)
+                                             num_atom_types)
         self.ce_loss = nn.CrossEntropyLoss()
         
         # for pretraining task 2 - central atom position prediction based on
@@ -372,7 +372,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
             atom_embs = self.dropout(self.activation_fn(atom_embs))
         else:
             atom_embs = self.dropout(atom_embs)
-        
+ 
         return self.propagate(edge_indices, atom_embs=atom_embs, pos=pos)
 
     def message(self, atom_embs_i, atom_embs_j, pos_i, pos_j):
@@ -565,6 +565,8 @@ class PhysNetPretrain(nn.Module):
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords
         X, _ = th.max(X, dim=0) # max pooling
+        if th.isnan(X).any():
+            print('nan in final embedding')
 
         # predict atom type
         atom_type_pred = self.atom_type_classifier(X)
@@ -595,6 +597,8 @@ class PhysNetPretrain(nn.Module):
         )
         torsion_pred = self.torsion_linear(torsion_h)
         loss_torsion = self.mae_loss(torsion_pred, torsion)
+        if th.isnan(loss_torsion).any():
+            print('nan in torsion loss')
 
         return loss_atom_type, loss_bond_type, \
                loss_bond_length, loss_bond_angle, loss_torsion, \
