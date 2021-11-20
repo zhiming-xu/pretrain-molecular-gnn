@@ -251,7 +251,7 @@ class DistanceExpansion(nn.Module):
 
 
 class PropertyPrediction(nn.Module):
-    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=1, reduction='none'):
+    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=1, reduction='mean'):
         super(PropertyPrediction, self).__init__()
         W = nn.Parameter(th.rand(input_size))
         b = nn.Parameter(th.rand(input_size))
@@ -604,13 +604,13 @@ class PhysNetPretrain(nn.Module):
                loss_bond_length, loss_bond_angle, loss_torsion, \
                loss_length_kld, loss_angle_kld, loss_torsion_kld
 
-    def encode(self, Z, R, bonds, ptr):
+    def encode(self, Z, R, bonds):
         x = self.atom_embedding(Z)
 
         xs = [x]
 
         for i in range(self.num_blocks):
-            xs.append(self.interaction_blocks[i](xs[-1], bonds, R, ptr))
+            xs.append(self.interaction_blocks[i](xs[-1], bonds, R))
 
         X = th.stack(xs, dim=0).transpose(1, 0) # sequence->module, batch->atom
         X = self.ipa_transformer(X)[0].transpose(1, 0) # only take the representation and ignore coords

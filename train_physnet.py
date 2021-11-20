@@ -27,7 +27,7 @@ parser.add_argument('-pretrain_epochs', type=int, default=50)
 parser.add_argument('-lr', type=float, default=1e-3)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
-parser.add_argument('-test', action='store_true')
+parser.add_argument('-pred', action='store_true')
 parser.add_argument('-pred_train_ratio', type=float, default=.8)
 parser.add_argument('-pred_batch_size', type=int, default=128)
 parser.add_argument('-hidden_size', type=int, default=128)
@@ -121,6 +121,24 @@ def train(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
+def run_batch(data, pretrain_model, pred_model, log, optim=None, train=False):
+    Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
+    molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
+    molecule_idx = molecule_idx.long()
+    with th.no_grad():
+        h = pretrain_model.encode(Z, R, bonds)
+    if train:
+        pred_model.zero_grad()
+        loss = pred_model(h, molecule_idx, target)
+        loss.backward()
+        optim.step()
+        log.append(loss.detach().cpu())
+    else:
+        with th.no_grad():
+            loss = pred_model(h, molecule_idx, target)
+            log.append(loss.cpu())
+ 
+
 def pred(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
@@ -141,7 +159,7 @@ def pred(args):
 
     input_size = 128
     # only do single target training
-    pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers, target_size=1)
+    pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
@@ -150,68 +168,62 @@ def pred(args):
         pred_model = pred_model.cuda()
 
     # optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
-    optimizer2 = Adam(pred_model.parameters(), lr=3e-4)
+    optimizer = Adam(pred_model.parameters(), lr=3e-4)
 
     for target_idx in range(12): # only use the first 12 targets
         tmp_dataset = deepcopy(dataset)
-        tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx]
-        dataloader = DataLoader(tmp_dataset, batch_size=args.pred_batch_size)
-        total = len(dataset)
-        num_train = round(total * args.pred_train_ratio)
+        tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
+        train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size)
+        val_loader = DataLoader(tmp_dataset[110000:120000], batch_size=args.pred_batch_size)
+        test_loader = DataLoader(tmp_dataset[120000:], batch_size=args.pred_batch_size)
+        best_val_loss, best_epoch = 1e9, None
         for epoch in tqdm(range(args.pred_epochs)):
-            train_losses, test_losses = [], []
-            cnt = 0
-            for data in tqdm(dataloader, leave=False):
-                Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
-                molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
-                molecule_idx = molecule_idx.long()
-                with th.no_grad():
-                    h = pretrain_model.encode(Z, R, bonds)
-                if cnt < num_train:
-                    pred_model.zero_grad()
-                    loss = pred_model(h, molecule_idx, data.y)
-                    loss.mean().backward()
-                    # optimizer1.step()
-                    optimizer2.step()
-                    train_losses.append(loss.detach().cpu().mean(dim=0))
-                else:
-                    with th.no_grad():
-                        h = pretrain_model.encode(Z, R, bonds)
-                        loss = pred_model(h, molecule_idx, target)
-                        test_losses.append(loss.detach().cpu().mean(dim=0))
-                cnt += 1
+            train_losses, val_losses, test_losses = [], [], []
+            for data in tqdm(train_loader, leave=False):
+                run_batch(data, pretrain_model, pred_model, train_losses, optimizer, train=True)
+            for data in tqdm(val_loader, leave=False):
+                run_batch(data, pretrain_model, pred_model, val_losses, train=False)
+            for data in tqdm(test_loader, leave=False):
+                run_batch(data, pretrain_model, pred_model, test_losses, train=False)
 
             train_losses = th.stack(train_losses)
             test_losses = th.stack(test_losses)
-            
-        if target_idx == 0: sw.add_scalar('Prediction/Train μ', train_losses.mean(), epoch)
-        elif target_idx == 1: sw.add_scalar('Prediction/Train α', train_losses.mean(), epoch)
-        elif target_idx == 2: sw.add_scalar('Prediction/Train ε_HOMO', test_losses.mean(), epoch),
-        elif target_idx == 3: sw.add_scalar('Prediction/Train ε_LUMO', test_losses.mean(), epoch),
-        elif target_idx == 4: sw.add_scalar('Prediction/Train Δε', test_losses.mean(), epoch),
-        elif target_idx == 5: sw.add_scalar('Prediction/Train <R>²', test_losses.mean(), epoch),
-        elif target_idx == 6: sw.add_scalar('Prediction/Train ZPVE²', test_losses.mean(), epoch),
-        elif target_idx == 7: sw.add_scalar('Prediction/Train U_0', test_losses.mean(), epoch),
-        elif target_idx == 8: sw.add_scalar('Prediction/Train U', test_losses.mean(), epoch),
-        elif target_idx == 9: sw.add_scalar('Prediction/Train H', test_losses.mean(), epoch),
-        elif target_idx == 10: sw.add_scalar('Prediction/Train G', test_losses.mean(), epoch),
-        elif target_idx == 11: sw.add_scalar('Prediction/Train c_v', test_losses.mean(), epoch)
-
-        if target_idx == 0: sw.add_scalar('Prediction/Test μ', train_losses.mean(), epoch)
-        elif target_idx == 1: sw.add_scalar('Prediction/Test α', train_losses.mean(), epoch)
-        elif target_idx == 2: sw.add_scalar('Prediction/Test ε_HOMO', test_losses.mean(), epoch),
-        elif target_idx == 3: sw.add_scalar('Prediction/Test ε_LUMO', test_losses.mean(), epoch),
-        elif target_idx == 4: sw.add_scalar('Prediction/Test Δε', test_losses.mean(), epoch),
-        elif target_idx == 5: sw.add_scalar('Prediction/Test <R>²', test_losses.mean(), epoch),
-        elif target_idx == 6: sw.add_scalar('Prediction/Test ZPVE²', test_losses.mean(), epoch),
-        elif target_idx == 7: sw.add_scalar('Prediction/Test U_0', test_losses.mean(), epoch),
-        elif target_idx == 8: sw.add_scalar('Prediction/Test U', test_losses.mean(), epoch),
-        elif target_idx == 9: sw.add_scalar('Prediction/Test H', test_losses.mean(), epoch),
-        elif target_idx == 10: sw.add_scalar('Prediction/Test G', test_losses.mean(), epoch),
-        elif target_idx == 11: sw.add_scalar('Prediction/Test c_v', test_losses.mean(), epoch)
+            val_loss = th.stack(val_losses).mean()
         
-        if (epoch+1) % args.ckpt_step == 0:
-            th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
+            if val_loss < best_val_loss:
+                best_epoch = epoch
+                best_val_loss = val_loss
+            sw.add_scalar('Validation/Target %d Best Epoch' % target_idx, best_epoch, epoch)
+            sw.add_scalar('Validation/Target %d Best Valid Loss' % target_idx, best_val_loss, epoch)
+            
+            if target_idx == 0: sw.add_scalar('Prediction/Train μ', train_losses.mean(), epoch)
+            elif target_idx == 1: sw.add_scalar('Prediction/Train α', train_losses.mean(), epoch)
+            elif target_idx == 2: sw.add_scalar('Prediction/Train ε_HOMO', test_losses.mean(), epoch),
+            elif target_idx == 3: sw.add_scalar('Prediction/Train ε_LUMO', test_losses.mean(), epoch),
+            elif target_idx == 4: sw.add_scalar('Prediction/Train Δε', test_losses.mean(), epoch),
+            elif target_idx == 5: sw.add_scalar('Prediction/Train <R>²', test_losses.mean(), epoch),
+            elif target_idx == 6: sw.add_scalar('Prediction/Train ZPVE²', test_losses.mean(), epoch),
+            elif target_idx == 7: sw.add_scalar('Prediction/Train U_0', test_losses.mean(), epoch),
+            elif target_idx == 8: sw.add_scalar('Prediction/Train U', test_losses.mean(), epoch),
+            elif target_idx == 9: sw.add_scalar('Prediction/Train H', test_losses.mean(), epoch),
+            elif target_idx == 10: sw.add_scalar('Prediction/Train G', test_losses.mean(), epoch),
+            elif target_idx == 11: sw.add_scalar('Prediction/Train c_v', test_losses.mean(), epoch)
+
+            if target_idx == 0: sw.add_scalar('Prediction/Test μ', train_losses.mean(), epoch)
+            elif target_idx == 1: sw.add_scalar('Prediction/Test α', train_losses.mean(), epoch)
+            elif target_idx == 2: sw.add_scalar('Prediction/Test ε_HOMO', test_losses.mean(), epoch),
+            elif target_idx == 3: sw.add_scalar('Prediction/Test ε_LUMO', test_losses.mean(), epoch),
+            elif target_idx == 4: sw.add_scalar('Prediction/Test Δε', test_losses.mean(), epoch),
+            elif target_idx == 5: sw.add_scalar('Prediction/Test <R>²', test_losses.mean(), epoch),
+            elif target_idx == 6: sw.add_scalar('Prediction/Test ZPVE²', test_losses.mean(), epoch),
+            elif target_idx == 7: sw.add_scalar('Prediction/Test U_0', test_losses.mean(), epoch),
+            elif target_idx == 8: sw.add_scalar('Prediction/Test U', test_losses.mean(), epoch),
+            elif target_idx == 9: sw.add_scalar('Prediction/Test H', test_losses.mean(), epoch),
+            elif target_idx == 10: sw.add_scalar('Prediction/Test G', test_losses.mean(), epoch),
+            elif target_idx == 11: sw.add_scalar('Prediction/Test c_v', test_losses.mean(), epoch)
+        
+            if (epoch+1) % args.ckpt_step == 0:
+                th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
 
 
 def main():
@@ -219,7 +231,7 @@ def main():
     args.running_id = '%s_%s' % (args.dataset.split('.')[0], datetime.strftime(datetime.now(), '%Y-%m-%d_%H%M'))
     if args.pretrain:
         train(args)
-    if args.test:
+    if args.pred:
         pred(args)
 
 
