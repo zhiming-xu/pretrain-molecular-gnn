@@ -2,6 +2,7 @@ import torch as th
 from torch.optim import Adam, SGD
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn.utils import clip_grad_norm_
 from argparse import ArgumentParser
 import os
 import re
@@ -12,6 +13,7 @@ from torch_geometric.transforms import Compose, ToDevice
 from torch_geometric.datasets import QM9
 from torch_geometric.loader import DataLoader
 from copy import deepcopy
+from warmup_scheduler import GradualWarmupScheduler
 
 from data_utils import QM7Dataset, DistanceAndPlanarAngle
 from nn import PhysNetPretrain, PropertyPrediction
@@ -20,19 +22,19 @@ from nn import PhysNetPretrain, PropertyPrediction
 parser = ArgumentParser('PhysNet')
 parser.add_argument('-data_dir', type=str, default='~/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
+parser.add_argument('-target_idx', type=list, default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_epochs', type=int, default=50)
-parser.add_argument('-lr', type=float, default=1e-3)
+parser.add_argument('-lr', type=float, default=1e-4)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', action='store_true')
-parser.add_argument('-pred_train_ratio', type=float, default=.8)
 parser.add_argument('-pred_batch_size', type=int, default=128)
 parser.add_argument('-hidden_size', type=int, default=128)
 parser.add_argument('-num_pred_layers', type=int, default=3)
-parser.add_argument('-pred_epochs', type=int, default=200)
+parser.add_argument('-pred_epochs', type=int, default=500)
 parser.add_argument('-resume', action='store_true')
 parser.add_argument('-resume_ckpt', type=str)
 
@@ -59,7 +61,6 @@ def train(args):
     optim = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         model = model.cuda()
-        # dataset = dataset.cuda()
 
     for epoch in range(tqdm(args.num_epochs)):
         loss_atom_types, loss_bond_types, \
@@ -121,7 +122,7 @@ def train(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, pretrain_model, pred_model, log, optim=None, train=False):
+def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, train=False):
     Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
     molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
     molecule_idx = molecule_idx.long()
@@ -130,9 +131,12 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, train=False):
     if train:
         pred_model.zero_grad()
         loss = pred_model(h, molecule_idx, target)
+        # clip norm
         loss.backward()
+        clip_grad_norm_(pred_model.parameters(), max_norm=1000)
         optim.step()
         log.append(loss.detach().cpu())
+        scheduler.step(epoch)
     else:
         with th.no_grad():
             loss = pred_model(h, molecule_idx, target)
@@ -167,20 +171,26 @@ def pred(args):
         pretrain_model = pretrain_model.cuda()
         pred_model = pred_model.cuda()
 
-    # optimizer1 = SGD(pretrain_model.parameters(), lr=1e-6)
-    optimizer = Adam(pred_model.parameters(), lr=3e-4)
+    optimizer = Adam(pred_model.parameters(), lr=args.lr)
+    scheduler = th.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9961697)
+    scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
-    for target_idx in range(12): # only use the first 12 targets
+    for target_idx in args.target_idx:
         tmp_dataset = deepcopy(dataset)
         tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
-        train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size)
+        if target_idx in {2,3,4,7,8,9,10}:
+            # unit change, from eV to meV
+            tmp_dataset.data.y = tmp_dataset.data.y * 1000
+        # use same setting as before, 110k for training, next 10k for validation and last 10k for test
+        train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
         val_loader = DataLoader(tmp_dataset[110000:120000], batch_size=args.pred_batch_size)
         test_loader = DataLoader(tmp_dataset[120000:], batch_size=args.pred_batch_size)
         best_val_loss, best_epoch = 1e9, None
         for epoch in tqdm(range(args.pred_epochs)):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, train_losses, optimizer, train=True)
+                run_batch(data, pretrain_model, pred_model, train_losses, optimizer,
+                          scheduler_warmup, epoch, train=True)
             for data in tqdm(val_loader, leave=False):
                 run_batch(data, pretrain_model, pred_model, val_losses, train=False)
             for data in tqdm(test_loader, leave=False):
