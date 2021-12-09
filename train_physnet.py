@@ -5,7 +5,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import clip_grad_norm_
 from argparse import ArgumentParser
 import os
-import re
 import json
 from tqdm import tqdm
 from datetime import datetime
@@ -16,7 +15,7 @@ from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
 from data_utils import QM7Dataset, DistanceAndPlanarAngle
-from nn import PhysNetPretrain, PropertyPrediction
+from model import PhysNetPretrain, PropertyPrediction, PMNet
 
 
 parser = ArgumentParser('PhysNet')
@@ -57,7 +56,7 @@ def train(args):
         ))
         dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
-    model = PhysNetPretrain(F=args.hidden_size)
+    model = PMNet()
     optim = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         model = model.cuda()
@@ -77,7 +76,7 @@ def train(args):
             loss_atom_type, loss_bond_type, \
             loss_bond_length, loss_bond_angle, loss_torsion, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ijk, bonds, bond_type, bond_length, bond_angle, plane, torsion)
+                model(Z, R, idx_ijk, bonds)
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + \

@@ -8,7 +8,7 @@ from argparse import ArgumentParser
 from datetime import datetime
 from tqdm import tqdm
 
-from nn import PropertyPrediction, SSLMolecule, DistanceExpansion
+from model import PropertyPrediction, SSLMolecule, DistanceExpansion
 from data_utils import *
 
 

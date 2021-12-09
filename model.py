@@ -1,3 +1,4 @@
+from numpy.testing._private.utils import requires_memory
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -617,3 +618,106 @@ class PhysNetPretrain(nn.Module):
         X, _ = th.max(X, dim=0) # max pooling
 
         return X
+
+
+class MultiHeadAttention(MessagePassing):
+    def __init__(self, hidden_size, num_head, rbf_size):
+        super().__init__()
+        self.W_q = nn.Linear(hidden_size, hidden_size*num_head, bias=False),
+        self.W_k = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
+        self.W_v = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
+        self.rbf = PhysNetRBFLayer(cutoff=10., K=rbf_size)
+        self.linear_i = nn.Linear(hidden_size, hidden_size)
+        self.linear_j = nn.Linear(hidden_size, hidden_size)
+        self.sqrt_d = hidden_size ** -0.5
+
+    def forward(self, atom_embs, edge_indices, pos):
+        return self.propagate(edge_indices, atom_embs=atom_embs, pos=pos)
+
+    def message(self, atom_embs_i, atom_embs_j, pos_i, pos_j):
+        Q = self.W_q(atom_embs_i)
+        K = self.W_k(atom_embs_i)
+        V = self.W_v(atom_embs_i)
+        prod = Q @ K.T / self.sqrt_d
+        h_atom_embs_i = self.linear_i(atom_embs_i)
+        h_atom_embs_j = self.linear_j(atom_embs_j)
+        edge_ij = th.cat([h_atom_embs_i+h_atom_embs_j, h_atom_embs_i-h_atom_embs_j,
+                          h_atom_embs_i*h_atom_embs_j])
+        
+
+
+class PMNetEncoder(nn.Module):
+    def __init__(self, num_elem_types, hidden_size, num_head, rbf_size, num_att_layer):
+        super().__init__()
+        self.att_layer_norm = nn.LayerNorm(hidden_size)
+        self.ipa_layer_norm = nn.LayerNorm(hidden_size)
+        self.atom_emb = nn.Embedding(num_elem_types, hidden_size)
+        self.nn = nn.ModuleList(
+            MultiHeadAttention(hidden_size, num_head, rbf_size)
+            for _ in range(num_att_layer)
+        )
+        self.ipa_transformer = IPATransformer(dim=hidden_size, depth=6, require_pairwise_repr=False)
+
+    def forward(self, atom_ids, edge_indices):
+        atom_embs = self.atom_emb(atom_ids)
+        Xs = [atom_embs]
+        for layer in self.nn:
+            atom_embs = self.att_layer_norm(atom_embs)
+            atom_embs = layer(atom_embs, edge_indices)
+            Xs.append(atom_embs)
+ 
+        X = th.stack(Xs, dim=0).transpose(1, 0)
+        X = self.ipa_transformer(X)[0].transpose(1, 0).sum(dim=0)
+        X = self.ipa_layer_norm(X)
+ 
+        return X
+
+
+class PMNetDecoder(nn.Module):
+    def __init__(self, hidden_size, num_elem_types, num_bond_types):
+        self.atom_type_classifier = MLPClassifier(3, hidden_size, hidden_size, num_elem_types)
+        self.bond_type_classifier = BilinearClassifier(3, hidden_size, hidden_size, num_bond_types)
+        self.bond_length_vae = DualVAE(hidden_size, hidden_size, 3)
+        self.bond_length_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
+        self.bond_angle_vae = TriVAE(hidden_size, hidden_size, 3)
+        self.bond_angle_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
+        self.torsion_vae = QuadVAE(hidden_size, hidden_size, 3)
+        self.torsion_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
+
+    def forward(self, X, bonds, idx_ijk, plane):
+        # predict atom type
+        atom_type_pred = self.atom_type_classifier(X)
+        # predict bond type
+        atom_reprs = X[bonds]
+        bond_type_pred = self.bond_type_classifier(atom_reprs[0,:], atom_reprs[1,:])
+        # predict bond length
+        gaussians = th.rand((bonds.shape[1], self.hidden_size)).to(X.device)
+        bond_length_h, loss_length_kld = self.bond_length_vae(gaussians, atom_reprs[0,:], atom_reprs[1,:])
+        bond_length_pred = self.bond_length_linear(bond_length_h)
+        # FIXME no normalization on bond lengths is performed currently
+        # predict bond angle
+        atom_reprs = X[idx_ijk]
+        gaussians = th.rand((idx_ijk.shape[0], self.hidden_size)).to(X.device)
+        bond_angle_h, loss_angle_kld = self.bond_angle_vae(
+            gaussians, atom_reprs[:,0], atom_reprs[:,1], atom_reprs[:,2]
+        )
+        bond_angle_pred = self.bond_angle_linear(bond_angle_h)
+        # TODO check dihedral angle (torsion) implementation
+        atom_reprs = X[plane]
+        gaussians = th.rand((plane.shape[0], self.hidden_size)).to(X.device)
+        torsion_h, loss_torsion_kld = self.torsion_vae(
+            gaussians, atom_reprs[:,0], atom_reprs[:, 1], atom_reprs[:, 2], atom_reprs[:, 3]
+        )
+        torsion_pred = self.torsion_linear(torsion_h)
+        return atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred
+
+
+class PMNet(nn.Module):
+    def __init__(self, hidden_size=64, num_head=8, rbf_size=8, num_att_layer=6, num_elem_types=20, num_bond_types=4):
+        super().__init__()
+        self.encoder = PMNetEncoder(num_elem_types, hidden_size, num_head, rbf_size, num_att_layer)
+        self.decoder = PMNetDecoder(hidden_size, num_elem_types, num_bond_types)
+
+    def forward(self, Z, R, idx_ijk, bonds, plane):
+        X = self.encoder(Z, bonds)
+        self.decoder(X, bonds, idx_ijk, plane)
