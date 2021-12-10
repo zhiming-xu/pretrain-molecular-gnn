@@ -623,7 +623,7 @@ class PhysNetPretrain(nn.Module):
 class MultiHeadAttention(MessagePassing):
     def __init__(self, hidden_size, num_head, rbf_size):
         super().__init__()
-        self.W_q = nn.Linear(hidden_size, hidden_size*num_head, bias=False),
+        self.W_q = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_k = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_v = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.rbf = PhysNetRBFLayer(cutoff=10., K=rbf_size)
@@ -642,7 +642,8 @@ class MultiHeadAttention(MessagePassing):
         h_atom_embs_i = self.linear_i(atom_embs_i)
         h_atom_embs_j = self.linear_j(atom_embs_j)
         edge_ij = th.cat([h_atom_embs_i+h_atom_embs_j, h_atom_embs_i-h_atom_embs_j,
-                          h_atom_embs_i*h_atom_embs_j])
+                          h_atom_embs_i*h_atom_embs_j], dim=-1)
+        pass
         
 
 
@@ -658,12 +659,12 @@ class PMNetEncoder(nn.Module):
         )
         self.ipa_transformer = IPATransformer(dim=hidden_size, depth=6, require_pairwise_repr=False)
 
-    def forward(self, atom_ids, edge_indices):
+    def forward(self, atom_ids, edge_indices, pos):
         atom_embs = self.atom_emb(atom_ids)
         Xs = [atom_embs]
         for layer in self.nn:
             atom_embs = self.att_layer_norm(atom_embs)
-            atom_embs = layer(atom_embs, edge_indices)
+            atom_embs = layer(atom_embs, edge_indices, pos)
             Xs.append(atom_embs)
  
         X = th.stack(Xs, dim=0).transpose(1, 0)
@@ -675,6 +676,7 @@ class PMNetEncoder(nn.Module):
 
 class PMNetDecoder(nn.Module):
     def __init__(self, hidden_size, num_elem_types, num_bond_types):
+        super().__init__()
         self.atom_type_classifier = MLPClassifier(3, hidden_size, hidden_size, num_elem_types)
         self.bond_type_classifier = BilinearClassifier(3, hidden_size, hidden_size, num_bond_types)
         self.bond_length_vae = DualVAE(hidden_size, hidden_size, 3)
@@ -719,5 +721,5 @@ class PMNet(nn.Module):
         self.decoder = PMNetDecoder(hidden_size, num_elem_types, num_bond_types)
 
     def forward(self, Z, R, idx_ijk, bonds, plane):
-        X = self.encoder(Z, bonds)
+        X = self.encoder(Z, bonds, R)
         self.decoder(X, bonds, idx_ijk, plane)

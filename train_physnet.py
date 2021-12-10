@@ -61,7 +61,7 @@ def train(args):
     if args.cuda:
         model = model.cuda()
 
-    for epoch in range(tqdm(args.num_epochs)):
+    for epoch in tqdm(range(args.pretrain_epochs)):
         loss_atom_types, loss_bond_types, \
         loss_bond_lengths, loss_bond_angles, loss_torsions, \
         loss_length_klds, loss_angle_klds, loss_torsion_klds, \
@@ -76,7 +76,7 @@ def train(args):
             loss_atom_type, loss_bond_type, \
             loss_bond_length, loss_bond_angle, loss_torsion, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ijk, bonds)
+                model(Z, R, idx_ijk, bonds, plane)
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + \
