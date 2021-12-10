@@ -14,7 +14,7 @@ from torch_geometric.loader import DataLoader
 from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
-from data_utils import QM7Dataset, DistanceAndPlanarAngle
+from data_utils import QM7Dataset, PMNetTransform
 from model import PhysNetPretrain, PropertyPrediction, PMNet
 
 
@@ -52,7 +52,7 @@ def train(args):
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
         qm9 = QM9(args.data_dir, transform=Compose(
-            [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
+            [PMNetTransform(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
         dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
@@ -154,7 +154,7 @@ def pred(args):
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
         dataset = QM9(args.data_dir, transform=Compose(
-            [DistanceAndPlanarAngle(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
+            [PMNetTransform(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
     pretrain_model = PhysNetPretrain()
 
