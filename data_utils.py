@@ -2,7 +2,9 @@ import scipy.io as si
 import numpy as np
 import torch as th
 from torch.utils.data import Dataset
+import torch_geometric as pyg
 from torch_geometric.transforms import BaseTransform
+from scipy.linalg import fractional_matrix_power, inv
 
 
 z2id = {1:0, 6: 1, 7:2, 8:3, 16: 4}
@@ -239,7 +241,7 @@ class PMNetTransform(BaseTransform):
     def __init__(self) -> None:
        super().__init__()
         
-    def __call__(self, data):
+    def __call__(self, data, alpha=0.2):
         # calculate bond angle
         (src, dst), pos = data.edge_index, data.pos
         # prepare the (i,j,k) triplet for bond angle
@@ -310,5 +312,15 @@ class PMNetTransform(BaseTransform):
             data.plane = th.LongTensor([[0,1,2,0]])
             # data.torsion = None
             # data.plane = None
-        
+
+        # prepare diffusion matrix
+        A = pyg.utils.to_scipy_sparse_matrix(data.edge_index)
+        A = np.array(A.todense())
+        # if self_loop:
+        #     a = a + np.eye(a.shape[0])                                    # A^ = A + I_n
+        D = np.diag(np.sum(A, 1))                                           # D^ = Sigma A^_ii
+        dinv = fractional_matrix_power(D, -0.5)                             # D^(-1/2)
+        A_tilde = np.matmul(np.matmul(dinv, A), dinv)                       # A~ = D^(-1/2) x A^ x D^(-1/2)
+        data.diffusion = th.FloatTensor(alpha * inv((np.eye(A.shape[0]) - (1 - alpha) * A_tilde)))    # a(I_n-(1-a)A~)^-1
+
         return data
