@@ -635,6 +635,7 @@ class MultiHeadAttention(MessagePassing):
         return self.propagate(edge_indices, atom_embs=atom_embs, pos=pos)
 
     def message(self, atom_embs_i, atom_embs_j, pos_i, pos_j):
+        # append diffusion to atom_embs
         Q = self.W_q(atom_embs_i)
         K = self.W_k(atom_embs_i)
         V = self.W_v(atom_embs_i)
@@ -643,6 +644,7 @@ class MultiHeadAttention(MessagePassing):
         h_atom_embs_j = self.linear_j(atom_embs_j)
         edge_ij = th.cat([h_atom_embs_i+h_atom_embs_j, h_atom_embs_i-h_atom_embs_j,
                           h_atom_embs_i*h_atom_embs_j], dim=-1)
+        # rbf on pos_i, pos_j
         pass
         
 

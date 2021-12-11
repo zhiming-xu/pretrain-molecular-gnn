@@ -235,7 +235,7 @@ class QM7Dataset(Dataset):
         return data
 
 
-class DistanceAndPlanarAngle(BaseTransform):
+class PMNetTransform(BaseTransform):
     def __init__(self) -> None:
        super().__init__()
         
