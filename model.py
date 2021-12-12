@@ -8,6 +8,7 @@ import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
 from torch_geometric.nn import MessagePassing
+from torch_scatter import scatter_softmax
 th.manual_seed(42)
 
 from nn_utils import *
@@ -354,7 +355,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         super().__init__(aggr='add')
         self.activation_fn = activation_fn
         self.dropout = nn.Dropout(drop_prob)
-        self.rbf = PhysNetRBFLayer(cutoff=10., K=K)
+        self.rbf = ExponentialRBF(cutoff=10., K=K)
         self.k2f = nn.Linear(K, F, bias=False)
         self.dense_i = nn.Linear(F, F)
         self.dense_j = nn.Linear(F, F)
@@ -409,9 +410,9 @@ class AtomwiseMsgPassingAttention(nn.Module):
         return att_weight.unsqueeze(dim=-1)
 
 
-class PhysNetRBFLayer(nn.Module):
+class ExponentialRBF(nn.Module):
     def __init__(self, cutoff, K):
-        super(PhysNetRBFLayer, self).__init__()
+        super(ExponentialRBF, self).__init__()
         self.K = K
         self.cutoff = cutoff
         centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), K))
@@ -475,7 +476,7 @@ class PhysNet(nn.Module):
         super(PhysNet, self).__init__()
         self.num_blocks = num_blocks
         self.atom_embedding = AtomEmbedding(20, F)
-        self.rbf_layer = PhysNetRBFLayer(short_cutoff, K)
+        self.rbf_layer = ExponentialRBF(short_cutoff, K)
         self.interaction_blocks = nn.ModuleList()
         self.output_blocks = nn.ModuleList()
         for _ in range(num_blocks):
@@ -626,27 +627,34 @@ class MultiHeadAttention(MessagePassing):
         self.W_q = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_k = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_v = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
-        self.rbf = PhysNetRBFLayer(cutoff=10., K=rbf_size)
+        self.rbf = ExponentialRBF(cutoff=10., K=rbf_size)
         self.linear_i = nn.Linear(hidden_size, hidden_size)
         self.linear_j = nn.Linear(hidden_size, hidden_size)
+        self.edge_linear = nn.Linear(3*hidden_size, hidden_size*num_head)
+        self.rbf_linear = nn.Linear(rbf_size, hidden_size*num_head)
+        self.out_linear = nn.Linear(hidden_size*num_head, hidden_size)
         self.sqrt_d = hidden_size ** -0.5
 
-    def forward(self, atom_embs, edge_indices, pos):
-        return self.propagate(edge_indices, atom_embs=atom_embs, pos=pos)
+    def forward(self, atom_embs, edge_indices, pos, edge_weight):
+        return self.propagate(edge_indices, edge_indices=edge_indices, atom_embs=atom_embs,
+                              pos=pos, edge_weight=edge_weight)
 
-    def message(self, atom_embs_i, atom_embs_j, pos_i, pos_j):
+    def message(self, edge_indices, atom_embs_i, atom_embs_j, pos_i, pos_j, edge_weight):
         # append diffusion to atom_embs
+        atom_embs_i += edge_weight.unsqueeze(-1)
+        atom_embs_j += edge_weight.unsqueeze(-1)
         Q = self.W_q(atom_embs_i)
         K = self.W_k(atom_embs_i)
         V = self.W_v(atom_embs_i)
-        prod = Q @ K.T / self.sqrt_d
+        # softmax over all src atoms
+        prod = scatter_softmax(Q @ K.T * self.sqrt_d, edge_indices[0])
         h_atom_embs_i = self.linear_i(atom_embs_i)
         h_atom_embs_j = self.linear_j(atom_embs_j)
         edge_ij = th.cat([h_atom_embs_i+h_atom_embs_j, h_atom_embs_i-h_atom_embs_j,
                           h_atom_embs_i*h_atom_embs_j], dim=-1)
-        # rbf on pos_i, pos_j
-        pass
-        
+        dist = th.norm(pos_i-pos_j, dim=-1)
+        dist_exp = self.rbf(dist)
+        return self.out_linear(prod @ (self.edge_linear(edge_ij) + self.rbf_linear(dist_exp) + V))
 
 
 class PMNetEncoder(nn.Module):
@@ -655,18 +663,18 @@ class PMNetEncoder(nn.Module):
         self.att_layer_norm = nn.LayerNorm(hidden_size)
         self.ipa_layer_norm = nn.LayerNorm(hidden_size)
         self.atom_emb = nn.Embedding(num_elem_types, hidden_size)
-        self.nn = nn.ModuleList(
+        self.layers = nn.ModuleList(
             MultiHeadAttention(hidden_size, num_head, rbf_size)
             for _ in range(num_att_layer)
         )
         self.ipa_transformer = IPATransformer(dim=hidden_size, depth=6, require_pairwise_repr=False)
 
-    def forward(self, atom_ids, edge_indices, pos):
+    def forward(self, atom_ids, edge_indices, pos, edge_weight):
         atom_embs = self.atom_emb(atom_ids)
         Xs = [atom_embs]
-        for layer in self.nn:
+        for layer in self.layers:
             atom_embs = self.att_layer_norm(atom_embs)
-            atom_embs = layer(atom_embs, edge_indices, pos)
+            atom_embs = layer(atom_embs, edge_indices, pos, edge_weight)
             Xs.append(atom_embs)
  
         X = th.stack(Xs, dim=0).transpose(1, 0)
@@ -679,6 +687,7 @@ class PMNetEncoder(nn.Module):
 class PMNetDecoder(nn.Module):
     def __init__(self, hidden_size, num_elem_types, num_bond_types):
         super().__init__()
+        self.hidden_size = hidden_size
         self.atom_type_classifier = MLPClassifier(3, hidden_size, hidden_size, num_elem_types)
         self.bond_type_classifier = BilinearClassifier(3, hidden_size, hidden_size, num_bond_types)
         self.bond_length_vae = DualVAE(hidden_size, hidden_size, 3)
@@ -713,7 +722,8 @@ class PMNetDecoder(nn.Module):
             gaussians, atom_reprs[:,0], atom_reprs[:, 1], atom_reprs[:, 2], atom_reprs[:, 3]
         )
         torsion_pred = self.torsion_linear(torsion_h)
-        return atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred
+        return atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred, \
+               loss_length_kld, loss_angle_kld, loss_torsion_kld
 
 
 class PMNet(nn.Module):
@@ -722,6 +732,6 @@ class PMNet(nn.Module):
         self.encoder = PMNetEncoder(num_elem_types, hidden_size, num_head, rbf_size, num_att_layer)
         self.decoder = PMNetDecoder(hidden_size, num_elem_types, num_bond_types)
 
-    def forward(self, Z, R, idx_ijk, bonds, plane):
-        X = self.encoder(Z, bonds, R)
-        self.decoder(X, bonds, idx_ijk, plane)
+    def forward(self, Z, R, idx_ijk, bonds, edge_weight, plane):
+        X = self.encoder(Z, bonds, R, edge_weight)
+        return self.decoder(X, bonds, idx_ijk, plane)
