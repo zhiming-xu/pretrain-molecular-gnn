@@ -21,7 +21,7 @@ from model import PhysNetPretrain, PropertyPrediction, PMNet
 parser = ArgumentParser('PhysNet')
 parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
-parser.add_argument('-target_idx', type=list, default=list(range(12)))
+parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
@@ -36,6 +36,8 @@ parser.add_argument('-num_pred_layers', type=int, default=3)
 parser.add_argument('-pred_epochs', type=int, default=500)
 parser.add_argument('-resume', action='store_true')
 parser.add_argument('-resume_ckpt', type=str)
+
+TargetName = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
 
 
 def pretrain(args):
@@ -181,6 +183,9 @@ def pred(args):
     scheduler = th.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9961697)
     scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
+    if isinstance(args.target_idx, int):
+        args.target_idx = [args.target_idx]
+    
     for target_idx in args.target_idx:
         tmp_dataset = deepcopy(dataset)
         tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
@@ -212,31 +217,8 @@ def pred(args):
             sw.add_scalar('Validation/Target %d Best Epoch' % target_idx, best_epoch, epoch)
             sw.add_scalar('Validation/Target %d Best Valid Loss' % target_idx, best_val_loss, epoch)
             
-            if target_idx == 0: sw.add_scalar('Prediction/Train μ', train_losses.mean(), epoch)
-            elif target_idx == 1: sw.add_scalar('Prediction/Train α', train_losses.mean(), epoch)
-            elif target_idx == 2: sw.add_scalar('Prediction/Train ε_HOMO', test_losses.mean(), epoch),
-            elif target_idx == 3: sw.add_scalar('Prediction/Train ε_LUMO', test_losses.mean(), epoch),
-            elif target_idx == 4: sw.add_scalar('Prediction/Train Δε', test_losses.mean(), epoch),
-            elif target_idx == 5: sw.add_scalar('Prediction/Train <R>²', test_losses.mean(), epoch),
-            elif target_idx == 6: sw.add_scalar('Prediction/Train ZPVE²', test_losses.mean(), epoch),
-            elif target_idx == 7: sw.add_scalar('Prediction/Train U_0', test_losses.mean(), epoch),
-            elif target_idx == 8: sw.add_scalar('Prediction/Train U', test_losses.mean(), epoch),
-            elif target_idx == 9: sw.add_scalar('Prediction/Train H', test_losses.mean(), epoch),
-            elif target_idx == 10: sw.add_scalar('Prediction/Train G', test_losses.mean(), epoch),
-            elif target_idx == 11: sw.add_scalar('Prediction/Train c_v', test_losses.mean(), epoch)
-
-            if target_idx == 0: sw.add_scalar('Prediction/Test μ', train_losses.mean(), epoch)
-            elif target_idx == 1: sw.add_scalar('Prediction/Test α', train_losses.mean(), epoch)
-            elif target_idx == 2: sw.add_scalar('Prediction/Test ε_HOMO', test_losses.mean(), epoch),
-            elif target_idx == 3: sw.add_scalar('Prediction/Test ε_LUMO', test_losses.mean(), epoch),
-            elif target_idx == 4: sw.add_scalar('Prediction/Test Δε', test_losses.mean(), epoch),
-            elif target_idx == 5: sw.add_scalar('Prediction/Test <R>²', test_losses.mean(), epoch),
-            elif target_idx == 6: sw.add_scalar('Prediction/Test ZPVE²', test_losses.mean(), epoch),
-            elif target_idx == 7: sw.add_scalar('Prediction/Test U_0', test_losses.mean(), epoch),
-            elif target_idx == 8: sw.add_scalar('Prediction/Test U', test_losses.mean(), epoch),
-            elif target_idx == 9: sw.add_scalar('Prediction/Test H', test_losses.mean(), epoch),
-            elif target_idx == 10: sw.add_scalar('Prediction/Test G', test_losses.mean(), epoch),
-            elif target_idx == 11: sw.add_scalar('Prediction/Test c_v', test_losses.mean(), epoch)
+            sw.add_scalar('Prediction/Train %s' % TargetName[target_idx], train_losses.mean(), epoch)
+            sw.add_scalar('Prediction/Test %s' % TargetName[target_idx], train_losses.mean(), epoch)
         
             if (epoch+1) % args.ckpt_step == 0:
                 th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
