@@ -19,7 +19,7 @@ from model import PhysNetPretrain, PropertyPrediction, PMNet
 
 
 parser = ArgumentParser('PhysNet')
-parser.add_argument('-data_dir', type=str, default='~/qm9')
+parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=list, default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
