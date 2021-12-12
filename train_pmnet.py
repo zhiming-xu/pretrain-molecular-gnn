@@ -1,5 +1,5 @@
 import torch as th
-from torch.optim import Adam, SGD
+from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils import clip_grad_norm_
@@ -131,14 +131,12 @@ def pretrain(args):
 
 
 def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, train=False):
-    Z, R, bonds, diffusion, target = data.z, data.pos, data.edge_index, data.diffusion, data.y
-    molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
-    molecule_idx = molecule_idx.long()
+    Z, R, bonds, diffusion, batch, target = data.z, data.pos, data.edge_index, data.diffusion, data.batch, data.y
     with th.no_grad():
         h = pretrain_model.encode(Z, R, bonds, diffusion)
     if train:
         pred_model.zero_grad()
-        loss = pred_model(h, molecule_idx, target)
+        loss = pred_model(h, batch, target)
         # clip norm
         loss.backward()
         clip_grad_norm_(pred_model.parameters(), max_norm=1000)
@@ -147,7 +145,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None,
         scheduler.step(epoch)
     else:
         with th.no_grad():
-            loss = pred_model(h, molecule_idx, target)
+            loss = pred_model(h, batch, target)
             log.append(loss.cpu())
  
 
