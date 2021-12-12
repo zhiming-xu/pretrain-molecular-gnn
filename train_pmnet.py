@@ -26,7 +26,7 @@ parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-ckpt_step', type=int, default=1)
 parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_epochs', type=int, default=50)
-parser.add_argument('-lr', type=float, default=1e-4)
+parser.add_argument('-lr', type=float, default=3e-4)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', action='store_true')
@@ -38,7 +38,7 @@ parser.add_argument('-resume', action='store_true')
 parser.add_argument('-resume_ckpt', type=str)
 
 
-def train(args):
+def pretrain(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_pretrain')
     # save arguments
@@ -61,6 +61,9 @@ def train(args):
     if args.cuda:
         model = model.cuda()
 
+    mae_loss = th.nn.L1Loss()
+    ce_loss = th.nn.CrossEntropyLoss()
+
     for epoch in tqdm(range(args.pretrain_epochs)):
         loss_atom_types, loss_bond_types, \
         loss_bond_lengths, loss_bond_angles, loss_torsions, \
@@ -68,20 +71,24 @@ def train(args):
         total_losses = [], [], [], [], [], [], [], [], []
         for batch_idx, data in enumerate(tqdm(dataloader, leave=False)):
             model.zero_grad()
-            Z, R, idx_ijk, bonds, \
+            Z, R, idx_ijk, bonds, edge_weight, \
                 bond_type, bond_length, bond_angle, plane, torsion = \
-            data.z, data.pos, data.idx_ijk, data.edge_index, \
+            data.z, data.pos, data.idx_ijk, data.edge_index, data.edge_weight, \
                 data.bond_type, data.bond_length, data.bond_angle, data.plane, data.torsion
             
-            loss_atom_type, loss_bond_type, \
-            loss_bond_length, loss_bond_angle, loss_torsion, \
+            atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ijk, bonds, plane)
+                model(Z, R, idx_ijk, bonds, edge_weight, plane)
+            loss_atom_type = ce_loss(atom_type_pred, Z)
+            loss_bond_type = ce_loss(bond_type_pred, bond_type)
+            loss_bond_length = mae_loss(bond_length_pred, bond_length)
+            loss_bond_angle = mae_loss(bond_angle_pred, bond_angle)
+            loss_torsion = mae_loss(torsion_pred, torsion)
             # FIXME VAE loss learning schedule
             
             total_loss = loss_bond_type + loss_atom_type + \
                 loss_bond_length + loss_bond_angle +  loss_torsion + \
-                ((epoch//3+1)*0.07) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
+                min(1, 10**(epoch//10-4)) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss.backward()
             optim.step()
 
@@ -122,11 +129,11 @@ def train(args):
 
 
 def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, train=False):
-    Z, R, bonds, target = data.z, data.pos, data.edge_index, data.y
+    Z, R, bonds, diffusion, target = data.z, data.pos, data.edge_index, data.diffusion, data.y
     molecule_idx = th.cat([th.zeros(data.ptr[i]-data.ptr[i-1])+i-1 for i in range(1,data.ptr.shape[0])])
     molecule_idx = molecule_idx.long()
     with th.no_grad():
-        h = pretrain_model.encode(Z, R, bonds)
+        h = pretrain_model.encode(Z, R, bonds, diffusion)
     if train:
         pred_model.zero_grad()
         loss = pred_model(h, molecule_idx, target)
@@ -239,7 +246,7 @@ def main():
     args = parser.parse_args()
     args.running_id = '%s_%s' % (args.dataset.split('.')[0], datetime.strftime(datetime.now(), '%Y-%m-%d_%H%M'))
     if args.pretrain:
-        train(args)
+        pretrain(args)
     if args.pred:
         pred(args)
 
