@@ -8,7 +8,7 @@ import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
 from torch_geometric.nn import MessagePassing
-from torch_scatter import scatter_softmax
+from torch_scatter import scatter_softmax, scatter_add
 th.manual_seed(42)
 
 from nn_utils import *
@@ -255,10 +255,6 @@ class DistanceExpansion(nn.Module):
 class PropertyPrediction(nn.Module):
     def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=1, reduction='mean'):
         super(PropertyPrediction, self).__init__()
-        W = nn.Parameter(th.rand(input_size))
-        b = nn.Parameter(th.rand(input_size))
-        self.register_parameter('W', W)
-        self.register_parameter('b', b)
         self.loss = nn.L1Loss(reduction=reduction)
 
         nets = []
@@ -273,11 +269,12 @@ class PropertyPrediction(nn.Module):
             nets.append(nn.Softplus())
         
         self.nn = nn.Sequential(*nets)
+        self.output_layer = nn.Linear(hidden_size, 1)
     
-    def forward(self, x, molecule_idx, target):
-        h = th.stack([th.einsum('nf,f->f', x[molecule_idx==i], self.W) + self.b for i in range(max(molecule_idx)+1)])
-        h = self.nn(h)
-        return self.loss(h, target)
+    def forward(self, x, batch, target):
+        h = self.nn(x)
+        pred_target = self.output_layer(scatter_add(h, batch))
+        return self.loss(pred_target, target)
 
 
 class ResidualLayer(nn.Module):
