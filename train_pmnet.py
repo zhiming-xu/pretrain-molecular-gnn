@@ -1,4 +1,5 @@
 import torch as th
+import torch.nn.functional as F
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -14,7 +15,7 @@ from torch_geometric.loader import DataLoader
 from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
-from data_utils import QM7Dataset, PMNetTransform
+from data_utils import QM7Dataset, PMNetTransform, Scaler
 from model import PhysNetPretrain, PropertyPrediction, PMNet
 
 
@@ -130,14 +131,16 @@ def pretrain(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, train=False):
-    Z, R, bonds, diffusion, batch, target = data.z, data.pos, data.edge_index, data.diffusion, data.batch, data.y
+def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, scaler=None, train=False):
+    Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     with th.no_grad():
-        h = pretrain_model.encode(Z, R, bonds, diffusion)
+        h = pretrain_model.encoder(Z, bonds, R, edge_weight)
     if train:
         pred_model.zero_grad()
-        loss = pred_model(h, batch, target)
+        pred = pred_model(h, batch)
         # clip norm
+        pred = scaler.scale_up(pred)
+        loss = F.l1_loss(pred, target)
         loss.backward()
         clip_grad_norm_(pred_model.parameters(), max_norm=1000)
         optim.step()
@@ -145,7 +148,9 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None,
         scheduler.step(epoch)
     else:
         with th.no_grad():
-            loss = pred_model(h, batch, target)
+            pred = pred_model(h, batch)
+            pred = scaler.scale_up(pred)
+            loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
  
 
@@ -163,11 +168,11 @@ def pred(args):
         dataset = QM9(args.data_dir, transform=Compose(
             [PMNetTransform(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
         ))
-    pretrain_model = PhysNetPretrain()
+    pretrain_model = PMNet()
 
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
-    input_size = 128
+    input_size = 64
     # only do single target training
     pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers)
     if args.resume:
@@ -187,9 +192,12 @@ def pred(args):
     for target_idx in args.target_idx:
         tmp_dataset = deepcopy(dataset)
         tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
+        scaler = Scaler(tmp_dataset.data.y)
+        '''keep the unit as in pyg dataset
         if target_idx in {2,3,4,7,8,9,10}:
             # unit change, from eV to meV
             tmp_dataset.data.y = tmp_dataset.data.y * 1000
+        '''
         # use same setting as before, 110k for training, next 10k for validation and last 10k for test
         train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
         val_loader = DataLoader(tmp_dataset[110000:120000], batch_size=args.pred_batch_size)
@@ -199,11 +207,11 @@ def pred(args):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
                 run_batch(data, pretrain_model, pred_model, train_losses, optimizer,
-                          scheduler_warmup, epoch, train=True)
+                          scheduler_warmup, epoch, scaler, train=True)
             for data in tqdm(val_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, val_losses, train=False)
+                run_batch(data, pretrain_model, pred_model, val_losses, scaler=scaler, train=False)
             for data in tqdm(test_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, test_losses, train=False)
+                run_batch(data, pretrain_model, pred_model, test_losses, scaler=scaler, train=False)
 
             train_losses = th.stack(train_losses)
             test_losses = th.stack(test_losses)

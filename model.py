@@ -253,28 +253,27 @@ class DistanceExpansion(nn.Module):
 
 
 class PropertyPrediction(nn.Module):
-    def __init__(self, input_size, hidden_size=32, num_layers=3, target_size=1, reduction='mean'):
+    def __init__(self, input_size, hidden_size=32, num_layers=3):
         super(PropertyPrediction, self).__init__()
-        self.loss = nn.L1Loss(reduction=reduction)
 
         nets = []
         for i in range(num_layers):
             if i == 0:
                 nets.append(nn.Linear(input_size, hidden_size))
-            elif i == num_layers - 1:
-                nets.append(nn.Linear(hidden_size, target_size))
-                # break # don't apply softplus for the last layer
             else:
                 nets.append(nn.Linear(hidden_size, hidden_size))
             nets.append(nn.Softplus())
         
         self.nn = nn.Sequential(*nets)
-        self.output_layer = nn.Linear(hidden_size, 1)
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, 1)
+        )
     
-    def forward(self, x, batch, target):
+    def forward(self, x, batch):
         h = self.nn(x)
-        pred_target = self.output_layer(scatter_add(h, batch))
-        return self.loss(pred_target, target)
+        pred_target = self.output_layer(scatter_add(h, batch.to(h.device), dim=0))
+        return pred_target
 
 
 class ResidualLayer(nn.Module):
