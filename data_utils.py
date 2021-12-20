@@ -325,3 +325,24 @@ class PMNetTransform(BaseTransform):
         data.edge_weight = diffusion[data.edge_index[0], data.edge_index[1]]
 
         return data
+
+
+class Scaler:
+    def __init__(self, tensor):
+        # scale to 0 to 100
+        self.scale = np.abs(tensor).max() > 200
+        if self.scale:
+            self.min = tensor.min().item()
+            self.max = tensor.max().item() / 100
+
+    def scale_down(self, tensor):
+        if self.scale:
+            tensor = tensor - self.min
+            tensor = tensor / self.max
+        return tensor
+
+    def scale_up(self, tensor):
+        if self.scale:
+            tensor = tensor * self.max
+            tensor = tensor + self.min
+        return tensor
