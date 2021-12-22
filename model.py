@@ -267,6 +267,7 @@ class PropertyPrediction(nn.Module):
         self.nn = nn.Sequential(*nets)
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
             nn.Linear(hidden_size, 1)
         )
     

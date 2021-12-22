@@ -32,7 +32,8 @@ parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', action='store_true')
 parser.add_argument('-pred_batch_size', type=int, default=128)
-parser.add_argument('-hidden_size', type=int, default=128)
+parser.add_argument('-hidden_size_pretrain', type=int, default=256)
+parser.add_argument('-hidden_size_pred', type=int, default=256)
 parser.add_argument('-num_pred_layers', type=int, default=3)
 parser.add_argument('-pred_epochs', type=int, default=500)
 parser.add_argument('-resume', action='store_true')
@@ -59,10 +60,12 @@ def pretrain(args):
         ))
         dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
-    model = PMNet()
-    optim = Adam(model.parameters(), lr=args.lr)
+    model = PMNet(hidden_size=args.hidden_size_pretrain)
+    optimizer = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         model = model.cuda()
+    scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
+    scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
     mae_loss = th.nn.L1Loss()
     ce_loss = th.nn.CrossEntropyLoss()
@@ -93,7 +96,7 @@ def pretrain(args):
                 loss_bond_length + loss_bond_angle +  loss_torsion + \
                 min(1, 10**(epoch//10-4)) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss.backward()
-            optim.step()
+            optimizer.step()
 
             loss_atom_types.append(loss_atom_type.detach().cpu().numpy())
             loss_bond_types.append(loss_bond_type.detach().cpu().numpy())
@@ -127,11 +130,13 @@ def pretrain(args):
         sw.add_scalar('Loss/Torsion KLD', sum(loss_torsion_klds)/total, epoch)
         sw.add_scalar('Loss/Total', sum(total_losses)/total, epoch)
 
+        scheduler_w_warmup.step(epoch=epoch, metrics=sum(loss_torsions)/total)
+
         if (epoch+1) % args.ckpt_step == 0:
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None, epoch=None, scaler=None, train=False):
+def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
     Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     with th.no_grad():
         h = pretrain_model.encoder(Z, bonds, R, edge_weight)
@@ -145,7 +150,6 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scheduler=None,
         clip_grad_norm_(pred_model.parameters(), max_norm=1000)
         optim.step()
         log.append(loss.detach().cpu())
-        scheduler.step(epoch)
     else:
         with th.no_grad():
             pred = pred_model(h, batch)
@@ -172,9 +176,9 @@ def pred(args):
 
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
-    input_size = 64
     # only do single target training
-    pred_model = PropertyPrediction(input_size, args.hidden_size, args.num_pred_layers)
+    pred_model = PropertyPrediction(args.hidden_size_pretrain, args.hidden_size_pred,
+                                    args.num_pred_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
@@ -183,8 +187,8 @@ def pred(args):
         pred_model = pred_model.cuda()
 
     optimizer = Adam(pred_model.parameters(), lr=args.lr)
-    scheduler = th.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9961697)
-    scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
+    scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
+    scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
     if isinstance(args.target_idx, int):
         args.target_idx = [args.target_idx]
@@ -193,11 +197,6 @@ def pred(args):
         tmp_dataset = deepcopy(dataset)
         tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
         scaler = Scaler(tmp_dataset.data.y)
-        '''keep the unit as in pyg dataset
-        if target_idx in {2,3,4,7,8,9,10}:
-            # unit change, from eV to meV
-            tmp_dataset.data.y = tmp_dataset.data.y * 1000
-        '''
         # use same setting as before, 110k for training, next 10k for validation and last 10k for test
         train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
         val_loader = DataLoader(tmp_dataset[110000:120000], batch_size=args.pred_batch_size)
@@ -207,7 +206,7 @@ def pred(args):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
                 run_batch(data, pretrain_model, pred_model, train_losses, optimizer,
-                          scheduler_warmup, epoch, scaler, train=True)
+                          scheduler_w_warmup, epoch, scaler=scaler, train=True)
             for data in tqdm(val_loader, leave=False):
                 run_batch(data, pretrain_model, pred_model, val_losses, scaler=scaler, train=False)
             for data in tqdm(test_loader, leave=False):
@@ -216,7 +215,9 @@ def pred(args):
             train_losses = th.stack(train_losses)
             test_losses = th.stack(test_losses)
             val_loss = th.stack(val_losses).mean()
-        
+            
+            scheduler_w_warmup.step(epoch, metrics=val_loss)
+ 
             if val_loss < best_val_loss:
                 best_epoch = epoch
                 best_val_loss = val_loss

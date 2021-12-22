@@ -330,7 +330,7 @@ class PMNetTransform(BaseTransform):
 class Scaler:
     def __init__(self, tensor):
         # scale to 0 to 100
-        self.scale = np.abs(tensor).max() > 200
+        self.scale = th.abs(tensor).max() > 200
         if self.scale:
             self.min = tensor.min().item()
             self.max = tensor.max().item() / 100
