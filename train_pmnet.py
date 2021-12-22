@@ -16,7 +16,7 @@ from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
 from data_utils import QM7Dataset, PMNetTransform, Scaler
-from model import PhysNetPretrain, PropertyPrediction, PMNet
+from model import PropertyPrediction, PMNet, PropertyPredictionTransformer
 
 
 parser = ArgumentParser('PhysNet')
@@ -179,8 +179,7 @@ def pred(args):
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
     # only do single target training
-    pred_model = PropertyPrediction(args.hidden_size_pretrain, args.hidden_size_pred,
-                                    args.num_pred_layers)
+    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_layers=args.num_pred_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 

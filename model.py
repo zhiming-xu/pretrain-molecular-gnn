@@ -665,13 +665,31 @@ class TransformerEncoderLayer(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.Softplus(),
             nn.Linear(hidden_size, hidden_size),
-            nn.Softplus
+            nn.Softplus()
         )
 
     def forward(self, atom_embs, edge_indices, pos, edge_weight):
         atom_embs = self.layer_norm(self.att(atom_embs, edge_indices, pos, edge_weight))
         atom_embs = self.layer_norm(self.ffn(atom_embs))
         return atom_embs
+
+
+class PropertyPredictionTransformer(nn.Module):
+    def __init__(self, hidden_size, num_head=4, rbf_size=8, num_layers=3):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers):
+            self.layers.append(TransformerEncoderLayer(hidden_size, num_head, rbf_size))
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, 1)
+        )
+
+    def forward(self, h, edge_indices, pos, edge_weight, batch):
+        for layer in self.layers:
+            h = layer(h, edge_indices, pos, edge_weight)
+        return self.output_layer(scatter_add(h, batch.to(h.device), dim=0))
 
 
 class PMNetEncoder(nn.Module):
