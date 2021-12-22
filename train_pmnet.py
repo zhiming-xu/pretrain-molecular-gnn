@@ -144,7 +144,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
         h = pretrain_model.encoder(Z, bonds, R, edge_weight)
     if train:
         pred_model.zero_grad()
-        pred = pred_model(h, batch)
+        pred = pred_model(h, bonds, R, edge_weight, batch)
         # clip norm
         pred = scaler.scale_up(pred)
         loss = F.l1_loss(pred, target)
@@ -154,7 +154,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
         log.append(loss.detach().cpu())
     else:
         with th.no_grad():
-            pred = pred_model(h, batch)
+            pred = pred_model(h, bonds, R, edge_weight, batch)
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
@@ -184,8 +184,9 @@ def pred(args):
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
     if args.cuda:
-        pretrain_model = pretrain_model.cuda()
-        pred_model = pred_model.cuda()
+        device = th.device('cuda:%s' % args.gpu)
+        pretrain_model = pretrain_model.to(device)
+        pred_model = pred_model.to(device)
 
     optimizer = Adam(pred_model.parameters(), lr=args.lr)
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
