@@ -654,14 +654,33 @@ class MultiHeadAttention(MessagePassing):
         return self.out_linear(prod @ (self.edge_linear(edge_ij) + self.rbf_linear(dist_exp) + V))
 
 
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, hidden_size, num_head, rbf_size):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.att = MultiHeadAttention(hidden_size, num_head, rbf_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus
+        )
+
+    def forward(self, atom_embs, edge_indices, pos, edge_weight):
+        atom_embs = self.layer_norm(self.att(atom_embs, edge_indices, pos, edge_weight))
+        atom_embs = self.layer_norm(self.ffn(atom_embs))
+        return atom_embs
+
+
 class PMNetEncoder(nn.Module):
     def __init__(self, num_elem_types, hidden_size, num_head, rbf_size, num_att_layer):
         super().__init__()
-        self.att_layer_norm = nn.LayerNorm(hidden_size)
         self.ipa_layer_norm = nn.LayerNorm(hidden_size)
         self.atom_emb = nn.Embedding(num_elem_types, hidden_size)
         self.layers = nn.ModuleList(
-            MultiHeadAttention(hidden_size, num_head, rbf_size)
+            TransformerEncoderLayer(hidden_size, num_head, rbf_size)
             for _ in range(num_att_layer)
         )
         self.ipa_transformer = IPATransformer(dim=hidden_size, depth=6, require_pairwise_repr=False)
@@ -670,7 +689,6 @@ class PMNetEncoder(nn.Module):
         atom_embs = self.atom_emb(atom_ids)
         Xs = [atom_embs]
         for layer in self.layers:
-            atom_embs = self.att_layer_norm(atom_embs)
             atom_embs = layer(atom_embs, edge_indices, pos, edge_weight)
             Xs.append(atom_embs)
  
