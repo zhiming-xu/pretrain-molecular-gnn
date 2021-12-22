@@ -29,6 +29,7 @@ parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_epochs', type=int, default=50)
 parser.add_argument('-lr', type=float, default=3e-4)
 parser.add_argument('-cuda', action='store_true')
+parser.add_argument('-gpu', type=int, default=0)
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', action='store_true')
 parser.add_argument('-pred_batch_size', type=int, default=128)
@@ -56,14 +57,15 @@ def pretrain(args):
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
         qm9 = QM9(args.data_dir, transform=Compose(
-            [PMNetTransform(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
+            [PMNetTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
         ))
         dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
     model = PMNet(hidden_size=args.hidden_size_pretrain)
     optimizer = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
-        model = model.cuda()
+        device = th.device('cuda:%s' % args.gpu)
+        model = model.to(device)
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
@@ -170,9 +172,9 @@ def pred(args):
         raise DeprecationWarning('use QM9 instead')
     elif args.dataset == 'qm9':
         dataset = QM9(args.data_dir, transform=Compose(
-            [PMNetTransform(), ToDevice(th.device('cuda') if args.cuda else th.device('cpu'))]
+            [PMNetTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
         ))
-    pretrain_model = PMNet()
+    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
 
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
