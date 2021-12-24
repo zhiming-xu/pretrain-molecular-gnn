@@ -7,6 +7,7 @@ import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
+from torch.nn.modules.normalization import LayerNorm
 from torch_geometric.nn import MessagePassing
 from torch_scatter import scatter_softmax, scatter_add
 th.manual_seed(42)
@@ -675,21 +676,47 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class PropertyPredictionTransformer(nn.Module):
-    def __init__(self, hidden_size, num_head=4, rbf_size=8, num_layers=3):
+    def __init__(self, hidden_size, num_head=4, rbf_size=8, num_att_layer=3, dropout=0.5, reduce=True):
         super().__init__()
-        self.layers = nn.ModuleList()
-        for _ in range(num_layers):
-            self.layers.append(TransformerEncoderLayer(hidden_size, num_head, rbf_size))
+        self.transformers = nn.ModuleList(
+            PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head,
+                               beta=True, rbf_size=rbf_size, dropout=dropout)
+            for _ in range(num_att_layer)
+        )
+ 
+        self.ffns = nn.ModuleList(nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus())
+            for _ in range(num_att_layer)
+        )
+
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.Softplus(),
             nn.Linear(hidden_size, 1)
         )
+        self.num_att_layer = num_att_layer 
+        self.reduce = reduce
+        self.layer_norm = LayerNorm(hidden_size)
+        self.activation = nn.Softplus()
 
     def forward(self, h, edge_indices, pos, edge_weight, batch):
-        for layer in self.layers:
-            h = layer(h, edge_indices, pos, edge_weight)
-        return self.output_layer(scatter_add(h, batch.to(h.device), dim=0))
+        for i in range(self.num_att_layer):
+            h = self.layer_norm(h, edge_indices, pos, edge_weight)
+            h = h + self.activation(
+                self.transformers[i](h, edge_indices, pos, edge_weight)
+            )
+            h = self.layer_norm(h)
+            h = h + self.ffns[i](h)
+        
+        if self.reduce:
+            h = scatter_add(h, batch.to(h.device), dim=0)
+        
+        return self.output_layer(h)
 
 
 class PMNetEncoder(nn.Module):
