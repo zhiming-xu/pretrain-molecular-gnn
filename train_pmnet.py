@@ -9,14 +9,14 @@ import os
 import json
 from tqdm import tqdm
 from datetime import datetime
-from torch_geometric.transforms import Compose, ToDevice
+from torch_geometric.transforms import Compose, ToDevice, RadiusGraph
 from torch_geometric.datasets import QM9
 from torch_geometric.loader import DataLoader
 from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
-from data_utils import QM7Dataset, PMNetTransform, Scaler
-from model import PropertyPrediction, PMNet, PropertyPredictionTransformer
+from data_utils import QM7Dataset, PMNetTransform, Scaler, DiffusionTransform
+from model import PMNet, PropertyPredictionTransformer
 
 
 parser = ArgumentParser('PhysNet')
@@ -52,12 +52,11 @@ def pretrain(args):
     # save arguments
     data_file = os.path.join(args.data_dir, args.dataset)
 
-    if args.dataset == 'qm7':
-        dataloader = QM7Dataset(data_file)
-        raise DeprecationWarning('use QM9 instead')
-    elif args.dataset == 'qm9':
+    if args.dataset == 'qm9':
         qm9 = QM9(args.data_dir, transform=Compose(
-            [PMNetTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
+            [PMNetTransform(), RadiusGraph(r=5), DiffusionTransform(), ToDevice(
+                th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu')
+            )]
         ))
         dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
     # dataloader = DataLoader(dataset, args.train_batch_size)
@@ -67,7 +66,8 @@ def pretrain(args):
         device = th.device('cuda:%s' % args.gpu)
         model = model.to(device)
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
-    scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
+    scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0,
+                                                total_epoch=10, after_scheduler=scheduler)
 
     mae_loss = th.nn.L1Loss()
     ce_loss = th.nn.CrossEntropyLoss()
@@ -79,14 +79,14 @@ def pretrain(args):
         total_losses = [], [], [], [], [], [], [], [], []
         for batch_idx, data in enumerate(tqdm(dataloader, leave=False)):
             model.zero_grad()
-            Z, R, idx_ijk, bonds, edge_weight, \
+            Z, R, idx_ij, idx_ijk, bonds, edge_weight, \
                 bond_type, bond_length, bond_angle, plane, torsion = \
-            data.z, data.pos, data.idx_ijk, data.edge_index, data.edge_weight, \
+            data.z, data.pos, data.idx_ij.T, data.idx_ijk, data.edge_index, data.edge_weight, \
                 data.bond_type, data.bond_length, data.bond_angle, data.plane, data.torsion
             
             atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ijk, bonds, edge_weight, plane)
+                model(Z, R, idx_ij, idx_ijk, bonds, edge_weight, plane)
             loss_atom_type = ce_loss(atom_type_pred, Z)
             loss_bond_type = ce_loss(bond_type_pred, bond_type)
             loss_bond_length = mae_loss(bond_length_pred, bond_length)

@@ -241,9 +241,10 @@ class PMNetTransform(BaseTransform):
     def __init__(self) -> None:
        super().__init__()
         
-    def __call__(self, data, alpha=0.15):
+    def __call__(self, data):
         # calculate bond angle
         (src, dst), pos = data.edge_index, data.pos
+        data.idx_ij = th.LongTensor(data.edge_index).T
         # prepare the (i,j,k) triplet for bond angle
         adj_atoms = {}
         for s, d in zip(src, dst):
@@ -313,6 +314,15 @@ class PMNetTransform(BaseTransform):
             # data.torsion = None
             # data.plane = None
 
+        return data
+
+
+class DiffusionTransform(BaseTransform):
+    def __init__(self, alpha=.15) -> None:
+        super().__init__()
+        self.alpha = alpha
+
+    def __call__(self, data):
         # prepare diffusion matrix
         A = pyg.utils.to_scipy_sparse_matrix(data.edge_index)
         A = np.array(A.todense())
@@ -321,7 +331,7 @@ class PMNetTransform(BaseTransform):
         D = np.diag(np.sum(A, 1))                                           # D^ = Sigma A^_ii
         dinv = fractional_matrix_power(D, -0.5)                             # D^(-1/2)
         A_tilde = np.matmul(np.matmul(dinv, A), dinv)                       # A~ = D^(-1/2) x A^ x D^(-1/2)
-        diffusion = th.FloatTensor(alpha * inv((np.eye(A.shape[0]) - (1 - alpha) * A_tilde)))    # a(I_n-(1-a)A~)^-1
+        diffusion = th.FloatTensor(self.alpha * inv((np.eye(A.shape[0]) - (1 - self.alpha) * A_tilde)))    # a(I_n-(1-a)A~)^-1
         data.edge_weight = diffusion[data.edge_index[0], data.edge_index[1]]
 
         return data
