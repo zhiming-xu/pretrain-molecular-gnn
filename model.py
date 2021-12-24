@@ -804,7 +804,7 @@ class PMNetDecoder(nn.Module):
 
 
 class PMNet(nn.Module):
-    def __init__(self, hidden_size=64, num_head=8, rbf_size=8, num_att_layer=6,
+    def __init__(self, hidden_size=64, num_head=8, rbf_size=9, num_att_layer=6,
                  num_elem_types=20, num_bond_types=4, dropout=0.5):
         super().__init__()
         self.encoder = PMNetEncoder(num_elem_types, hidden_size, num_head, rbf_size,
