@@ -676,7 +676,7 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class PropertyPredictionTransformer(nn.Module):
-    def __init__(self, hidden_size, num_head=4, rbf_size=8, num_att_layer=3, dropout=0.5, reduce=True):
+    def __init__(self, hidden_size, num_head=4, rbf_size=9, num_att_layer=3, dropout=0.5, reduce=True):
         super().__init__()
         self.transformers = nn.ModuleList(
             PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head,
