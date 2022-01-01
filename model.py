@@ -706,7 +706,7 @@ class PropertyPredictionTransformer(nn.Module):
 
     def forward(self, h, edge_indices, pos, edge_weight, batch):
         for i in range(self.num_att_layer):
-            h = self.layer_norm(h, edge_indices, pos, edge_weight)
+            h = self.layer_norm(h)
             h = h + self.activation(
                 self.transformers[i](h, edge_indices, pos, edge_weight)
             )
@@ -715,7 +715,7 @@ class PropertyPredictionTransformer(nn.Module):
         
         if self.reduce:
             h = scatter_add(h, batch.to(h.device), dim=0)
-        
+ 
         return self.output_layer(h)
 
 
@@ -889,8 +889,8 @@ class PMNetEncoderLayer(MessagePassing):
             self.lin_beta.reset_parameters()
 
 
-    def forward(self, x: Union[Tensor, PairTensor], edge_index: Adj, pos: Tensor,
-                edge_weight: Tensor, return_attention_weights=None):
+    def forward(self, x: Union[Tensor, PairTensor], edge_index: Adj, pos: OptTensor,
+                edge_weight: OptTensor, return_attention_weights=None):
         r"""
         Args:
             return_attention_weights (bool, optional): If set to :obj:`True`,
@@ -940,15 +940,16 @@ class PMNetEncoderLayer(MessagePassing):
 
 
     def message(self, query_i: Tensor, key_j: Tensor, value_j: Tensor,
-                pos_i, pos_j, edge_weight: Tensor, index: Tensor, ptr: OptTensor,
-                size_i: Optional[int]) -> Tensor:
+                pos_i: OptTensor, pos_j: OptTensor, edge_weight: Tensor,
+                index: Tensor, ptr: OptTensor, size_i: Optional[int]) -> Tensor:
 
-        dist = th.norm(pos_i-pos_j, dim=-1)
-        dist_exp = self.rbf(dist)
-        edge_attr = self.lin_edge(
-            th.cat([dist_exp, edge_weight.unsqueeze(-1)], dim=-1)).view(-1, self.heads, self.out_channels
-        )
-        key_j += edge_attr
+        if pos_i is not None and pos_j is not None:
+            dist = th.norm(pos_i-pos_j, dim=-1)
+            dist_exp = self.rbf(dist)
+            edge_attr = self.lin_edge(
+                th.cat([dist_exp, edge_weight.unsqueeze(-1)], dim=-1)
+            ).view(-1, self.heads, self.out_channels)
+            key_j += edge_attr
 
         alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
         alpha = softmax(alpha, index, ptr, size_i)
