@@ -10,16 +10,15 @@ import json
 from tqdm import tqdm
 from datetime import datetime
 from torch_geometric.transforms import Compose, ToDevice, RadiusGraph
-from torch_geometric.datasets import QM9
+from torch_geometric.datasets import QM9, MD17
 from torch_geometric.loader import DataLoader
-from copy import deepcopy
 from warmup_scheduler import GradualWarmupScheduler
 
-from data_utils import QM7Dataset, PMNetTransform, Scaler, DiffusionTransform
+from data_utils import PMNetTransform, Scaler, DiffusionTransform
 from model import PMNet, PropertyPredictionTransformer
 
 
-parser = ArgumentParser('PhysNet')
+parser = ArgumentParser('PMNet')
 parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
@@ -159,28 +158,42 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
- 
 
-def pred(args):
+
+def run_batch_sup(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
+    Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
+    if train:
+        pred_model.zero_grad()
+        pred = pred_model(Z, bonds, batch)
+        # clip norm
+        pred = scaler.scale_up(pred)
+        loss = F.l1_loss(pred, target)
+        loss.backward()
+        clip_grad_norm_(pred_model.parameters(), max_norm=1000)
+        optim.step()
+        log.append(loss.detach().cpu())
+    else:
+        with th.no_grad():
+            pred = pred_model(Z, bonds, batch)
+            pred = scaler.scale_up(pred)
+            loss = F.l1_loss(pred, target)
+            log.append(loss.cpu())
+
+
+def pred_qm9(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
     # save arguments
     with open(f'logs/{args.running_id}_predict/args.json', 'w') as f:
         json.dump(vars(args), f)
     data_file = os.path.join(args.data_dir, args.dataset)
-    if args.dataset == 'qm7':
-        dataset = QM7Dataset(data_file)
-        raise DeprecationWarning('use QM9 instead')
-    elif args.dataset == 'qm9':
-        dataset = QM9(args.data_dir, transform=Compose(
-            [PMNetTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
-        ))
+    targetname = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
     pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
 
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
     # only do single target training
-    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_layers=args.num_pred_layers)
+    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_att_layer=args.num_pred_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
@@ -197,19 +210,26 @@ def pred(args):
         args.target_idx = [args.target_idx]
     
     for target_idx in args.target_idx:
-        tmp_dataset = deepcopy(dataset)
-        tmp_dataset.data.y = tmp_dataset.data.y[:,target_idx].unsqueeze(-1)
-        scaler = Scaler(tmp_dataset.data.y)
+        dataset = QM9(args.data_dir, transform=Compose(
+            [PMNetTransform(), DiffusionTransform(),
+            ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
+        ))
+        dataset.data.y = dataset.data.y[:,target_idx].unsqueeze(-1)
+ 
+        scaler = Scaler(dataset.data.y)
+        if scaler.scale:
+            print('scale target %s' % targetname[target_idx])
+        else:
+            print('keep the magnitude of target %s' % targetname[target_idx])
         # use same setting as before, 110k for training, next 10k for validation and last 10k for test
-        train_loader = DataLoader(tmp_dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
-        val_loader = DataLoader(tmp_dataset[110000:120000], batch_size=args.pred_batch_size)
-        test_loader = DataLoader(tmp_dataset[120000:], batch_size=args.pred_batch_size)
+        train_loader = DataLoader(dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
+        val_loader = DataLoader(dataset[110000:120000], batch_size=args.pred_batch_size)
+        test_loader = DataLoader(dataset[120000:], batch_size=args.pred_batch_size)
         best_val_loss, best_epoch = 1e9, None
         for epoch in tqdm(range(args.pred_epochs)):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, train_losses, optimizer,
-                          scheduler_w_warmup, epoch, scaler=scaler, train=True)
+                run_batch(data, pretrain_model, pred_model, train_losses, optimizer, scaler=scaler, train=True)
             for data in tqdm(val_loader, leave=False):
                 run_batch(data, pretrain_model, pred_model, val_losses, scaler=scaler, train=False)
             for data in tqdm(test_loader, leave=False):
@@ -227,8 +247,79 @@ def pred(args):
             sw.add_scalar('Validation/Target %d Best Epoch' % target_idx, best_epoch, epoch)
             sw.add_scalar('Validation/Target %d Best Valid Loss' % target_idx, best_val_loss, epoch)
             
-            sw.add_scalar('Prediction/Train %s' % TargetName[target_idx], train_losses.mean(), epoch)
-            sw.add_scalar('Prediction/Test %s' % TargetName[target_idx], train_losses.mean(), epoch)
+            sw.add_scalar('Prediction/Train %s' % targetname[target_idx], train_losses.mean(), epoch)
+            sw.add_scalar('Prediction/Test %s' % targetname[target_idx], test_losses.mean(), epoch)
+        
+            if (epoch+1) % args.ckpt_step == 0:
+                th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
+
+
+def pred_md17(args):
+    # create summary writer
+    sw = SummaryWriter(f'logs/{args.running_id}_predict')
+    targetname = ['energy', 'force']
+    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
+    pretrain_model.load_state_dict(th.load(args.ckpt_file))
+
+    if isinstance(args.target_idx, int):
+        args.target_idx = [args.target_idx]
+    
+    for target_idx in args.target_idx:
+        # pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_layers=args.num_pred_layers,
+        #                                            out_size=1 if args.target_idx==0 else 3)
+        pred_model = PropertyPredictionTransformer(out_size=1 if target_idx==0 else 3)
+        # only do single target training
+        if args.resume:
+            pred_model.load_state_dict(th.load(args.resume_ckpt))
+
+        if args.cuda:
+            device = th.device('cuda:%s' % args.gpu)
+            pretrain_model = pretrain_model.to(device)
+            pred_model = pred_model.to(device)
+        
+        optimizer = Adam(pred_model.parameters(), lr=args.lr)
+        scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
+        scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
+
+        train_dataset = MD17(args.data_dir, name=args.dataset, train=True, transform=Compose([
+                RadiusGraph(r=5), MD17Transform(target_idx),
+                ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+            ]))
+        test_dataset = MD17(args.data_dir, name=args.dataset, train=False, transform=Compose([
+                RadiusGraph(r=5), MD17Transform(target_idx),
+                ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+            ]))
+        if target_idx == 0:
+            train_dataset.data.y = train_dataset.data.energy
+            test_dataset.data.y = test_dataset.data.energy
+            pred_model.reduce = True
+        elif target_idx == 1:
+            train_dataset.data.y = train_dataset.data.force
+            test_dataset.data.y = test_dataset.data.force
+            pred_model.reduce = False
+        
+        scaler = Scaler(train_dataset.data.y)
+        if scaler.scale:
+            print('scale target %s' % targetname[target_idx])
+        else:
+            print('keep the magnitude of target %s' % targetname[target_idx])
+        # use same setting as before, 110k for training, next 10k for validation and last 10k for test
+        train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
+        for epoch in tqdm(range(args.pred_epochs)):
+            train_losses, test_losses = [], []
+            for data in tqdm(train_loader, leave=False):
+                run_batch_sup(data, pretrain_model, pred_model, train_losses, optimizer, scaler=scaler, train=True)
+            for data in tqdm(test_loader, leave=False):
+                run_batch_sup(data, pretrain_model, pred_model, test_losses, scaler=scaler, train=False)
+
+            train_losses = th.stack(train_losses)
+            test_losses = th.stack(test_losses)
+            
+            scheduler_w_warmup.step(epoch, metrics=test_losses.mean())
+            
+            sw.add_scalar('Prediction/Train %s' % targetname[target_idx], train_losses.mean(), epoch)
+            sw.add_scalar('Prediction/Test %s' % targetname[target_idx], test_losses.mean(), epoch)
         
             if (epoch+1) % args.ckpt_step == 0:
                 th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
@@ -240,7 +331,7 @@ def main():
     if args.pretrain:
         pretrain(args)
     if args.pred:
-        pred(args)
+        pred_qm9(args)
 
 
 if __name__ == '__main__':
