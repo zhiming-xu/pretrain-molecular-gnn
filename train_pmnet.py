@@ -10,7 +10,7 @@ import json
 from tqdm import tqdm
 from datetime import datetime
 from torch_geometric.transforms import Compose, ToDevice, RadiusGraph
-from torch_geometric.datasets import QM9, MD17
+from torch_geometric.datasets import QM9, MoleculeNet, ZINC
 from torch_geometric.loader import DataLoader
 from warmup_scheduler import GradualWarmupScheduler
 
@@ -30,7 +30,7 @@ parser.add_argument('-lr', type=float, default=1e-4)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-gpu', type=int, default=0)
 parser.add_argument('-pretrain', action='store_true')
-parser.add_argument('-pred', action='store_true')
+parser.add_argument('-pred', type=str)
 parser.add_argument('-pred_batch_size', type=int, default=128)
 parser.add_argument('-hidden_size_pretrain', type=int, default=256)
 parser.add_argument('-num_head', type=int, default=8)
@@ -254,75 +254,66 @@ def pred_qm9(args):
                 th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
 
 
-def pred_md17(args):
+# use molnet and zinc instead, do not use md17
+def pred_biochem(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
-    targetname = ['energy', 'force']
     pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
-    if isinstance(args.target_idx, int):
-        args.target_idx = [args.target_idx]
+    pred_model = PropertyPredictionTransformer(out_size=1)
     
-    for target_idx in args.target_idx:
-        # pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_layers=args.num_pred_layers,
-        #                                            out_size=1 if args.target_idx==0 else 3)
-        pred_model = PropertyPredictionTransformer(out_size=1 if target_idx==0 else 3)
-        # only do single target training
-        if args.resume:
-            pred_model.load_state_dict(th.load(args.resume_ckpt))
-
-        if args.cuda:
-            device = th.device('cuda:%s' % args.gpu)
-            pretrain_model = pretrain_model.to(device)
-            pred_model = pred_model.to(device)
+    if args.resume:
+        pred_model.load_state_dict(th.load(args.resume_ckpt))
+    if args.cuda:
+        device = th.device('cuda:%s' % args.gpu)
+        pretrain_model = pretrain_model.to(device)
+        pred_model = pred_model.to(device)
+    
+    optimizer = Adam(pred_model.parameters(), lr=args.lr)
+    scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
+    scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
+    if args.dataset == 'HIV':
+        train_dataset = MoleculeNet(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+    elif args.dataset == 'ZINC':
+        # zinc have predefined splits
+        train_dataset = ZINC(args.data_dir, split='train', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        val_dataset = ZINC(args.data_dir, split='val', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        test_dataset = ZINC(args.data_dir, split='test', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+    else:
+        raise NotImplementedError('no dataset %s' % args.dataset)
+ 
+    train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.pred_batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
+    for epoch in tqdm(range(args.pred_epochs)):
+        train_losses, val_losses, test_losses = [], [], []
+        for data in tqdm(train_loader, leave=False):
+            run_batch_sup(data, pretrain_model, pred_model, train_losses, optimizer, train=True)
+        for data in tqdm(val_loader, leave=False):
+            run_batch_sup(data, pretrain_model, pred_model, val_losses, optimizer, train=False)
+        for data in tqdm(test_loader, leave=False):
+            run_batch_sup(data, pretrain_model, pred_model, test_losses, train=False)
+        train_losses = th.stack(train_losses)
+        val_losses = th.stack(val_losses)
+        test_losses = th.stack(test_losses)
+ 
+        scheduler_w_warmup.step(epoch, metrics=val_losses.mean())
         
-        optimizer = Adam(pred_model.parameters(), lr=args.lr)
-        scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
-        scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
-
-        train_dataset = MD17(args.data_dir, name=args.dataset, train=True, transform=Compose([
-                RadiusGraph(r=5), MD17Transform(target_idx),
-                ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-            ]))
-        test_dataset = MD17(args.data_dir, name=args.dataset, train=False, transform=Compose([
-                RadiusGraph(r=5), MD17Transform(target_idx),
-                ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-            ]))
-        if target_idx == 0:
-            train_dataset.data.y = train_dataset.data.energy
-            test_dataset.data.y = test_dataset.data.energy
-            pred_model.reduce = True
-        elif target_idx == 1:
-            train_dataset.data.y = train_dataset.data.force
-            test_dataset.data.y = test_dataset.data.force
-            pred_model.reduce = False
-        
-        scaler = Scaler(train_dataset.data.y)
-        if scaler.scale:
-            print('scale target %s' % targetname[target_idx])
-        else:
-            print('keep the magnitude of target %s' % targetname[target_idx])
-        # use same setting as before, 110k for training, next 10k for validation and last 10k for test
-        train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
-        for epoch in tqdm(range(args.pred_epochs)):
-            train_losses, test_losses = [], []
-            for data in tqdm(train_loader, leave=False):
-                run_batch_sup(data, pretrain_model, pred_model, train_losses, optimizer, scaler=scaler, train=True)
-            for data in tqdm(test_loader, leave=False):
-                run_batch_sup(data, pretrain_model, pred_model, test_losses, scaler=scaler, train=False)
-
-            train_losses = th.stack(train_losses)
-            test_losses = th.stack(test_losses)
-            
-            scheduler_w_warmup.step(epoch, metrics=test_losses.mean())
-            
-            sw.add_scalar('Prediction/Train %s' % targetname[target_idx], train_losses.mean(), epoch)
-            sw.add_scalar('Prediction/Test %s' % targetname[target_idx], test_losses.mean(), epoch)
-        
-            if (epoch+1) % args.ckpt_step == 0:
-                th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
+        sw.add_scalar('Prediction/Train %s' % args.dataset, train_losses.mean(), epoch)
+        sw.add_scalar('Prediction/Val %s' % args.dataset, val_losses.mean(), epoch)
+        sw.add_scalar('Prediction/Test %s' % args.dataset, test_losses.mean(), epoch)
+    
+        if (epoch+1) % args.ckpt_step == 0:
+            th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (args.dataset, epoch))
 
 
 def main():
@@ -330,8 +321,11 @@ def main():
     args.running_id = '%s_%s' % (args.dataset.split('.')[0], datetime.strftime(datetime.now(), '%Y-%m-%d_%H%M'))
     if args.pretrain:
         pretrain(args)
-    if args.pred:
+    
+    if args.pred == 'qm':
         pred_qm9(args)
+    elif args.pred == 'biochem':
+        pred_biochem(args)
 
 
 if __name__ == '__main__':
