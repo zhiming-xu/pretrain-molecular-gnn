@@ -141,10 +141,10 @@ def pretrain(args):
 def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
     Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     with th.no_grad():
-        h = pretrain_model.encoder(Z, bonds, R, edge_weight)
+        h = pretrain_model.encoder(Z, bonds, pos=None, edge_weight=None)
     if train:
         pred_model.zero_grad()
-        pred = pred_model(h, bonds, R, edge_weight, batch)
+        pred = pred_model(h, bonds, pos=None, edge_weight=None, batch=batch)
         # clip norm
         pred = scaler.scale_up(pred)
         loss = F.l1_loss(pred, target)
@@ -154,7 +154,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
         log.append(loss.detach().cpu())
     else:
         with th.no_grad():
-            pred = pred_model(h, bonds, R, edge_weight, batch)
+            pred = pred_model(h, bonds, pos=None, edge_weight=None, batch=batch)
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())

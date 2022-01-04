@@ -943,13 +943,15 @@ class PMNetEncoderLayer(MessagePassing):
                 pos_i: OptTensor, pos_j: OptTensor, edge_weight: Tensor,
                 index: Tensor, ptr: OptTensor, size_i: Optional[int]) -> Tensor:
 
+        edge_attr = 0
         if pos_i is not None and pos_j is not None:
             dist = th.norm(pos_i-pos_j, dim=-1)
             dist_exp = self.rbf(dist)
             edge_attr = self.lin_edge(
                 th.cat([dist_exp, edge_weight.unsqueeze(-1)], dim=-1)
             ).view(-1, self.heads, self.out_channels)
-            key_j += edge_attr
+        
+        key_j += edge_attr
 
         alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
         alpha = softmax(alpha, index, ptr, size_i)
