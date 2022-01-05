@@ -23,6 +23,7 @@ parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
+parser.add_argument('-num_elems', type=int, default=20)
 parser.add_argument('-ckpt_step', type=int, default=10)
 parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_epochs', type=int, default=200)
@@ -53,14 +54,20 @@ def pretrain(args):
     data_file = os.path.join(args.data_dir, args.dataset)
 
     if args.dataset == 'qm9':
-        qm9 = QM9(args.data_dir, transform=Compose(
+        dataset = QM9(args.data_dir, transform=Compose(
             [PMNetTransform(), RadiusGraph(r=5), DiffusionTransform(), ToDevice(
                 th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu')
             )]
         ))
-        dataloader = DataLoader(qm9, batch_size=args.pretrain_batch_size, shuffle=False)
-    # dataloader = DataLoader(dataset, args.train_batch_size)
-    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head)
+        dataloader = DataLoader(dataset, batch_size=args.pretrain_batch_size, shuffle=False)
+    elif args.dataset == 'HIV':
+        dataset = MoleculeNet(args.data_dir, name=args.dataset, transform=Compose(
+            [PMNetTransform(), RadiusGraph(r=5), DiffusionTransform(), ToDevice(
+                th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu')
+            )]
+        ))
+        dataloader = DataLoader(dataset, batch_size=args.pretrain_batch_size, shuffle=False)
+    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, num_elems=args.num_elems)
     optimizer = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         device = th.device('cuda:%s' % args.gpu)
@@ -261,7 +268,7 @@ def pred_biochem(args):
     pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
-    pred_model = PropertyPredictionTransformer(out_size=1)
+    pred_model = PropertyPredictionTransformer(hidden_size=args.hidden_size_pretrain)
     
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
