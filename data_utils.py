@@ -313,6 +313,11 @@ class PMNetTransform(BaseTransform):
             data.plane = th.LongTensor([[0,1,2,0]])
             # data.torsion = None
             # data.plane = None
+        
+        try:
+            data.z
+        except AttributeError:
+            data.z = data.x
 
         return data
 
