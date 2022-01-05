@@ -23,6 +23,8 @@ parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
+parser.add_argument('-num_pretrain_layers', type=int, default=6)
+parser.add_argument('-hidden_size_pretrain', type=int, default=1024)
 parser.add_argument('-num_elems', type=int, default=20)
 parser.add_argument('-ckpt_step', type=int, default=10)
 parser.add_argument('-ckpt_file', type=str)
@@ -33,10 +35,7 @@ parser.add_argument('-gpu', type=int, default=0)
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', type=str)
 parser.add_argument('-pred_batch_size', type=int, default=128)
-parser.add_argument('-hidden_size_pretrain', type=int, default=1024)
 parser.add_argument('-num_head', type=int, default=16)
-parser.add_argument('-hidden_size_pred', type=int, default=256)
-parser.add_argument('-num_pred_layers', type=int, default=3)
 parser.add_argument('-pred_epochs', type=int, default=500)
 parser.add_argument('-resume', action='store_true')
 parser.add_argument('-resume_ckpt', type=str)
@@ -148,10 +147,10 @@ def pretrain(args):
 def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
     Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     with th.no_grad():
-        h = pretrain_model.encoder(Z, bonds, pos=None, edge_weight=None)
+        Xs = pretrain_model.encoder.encode(Z, bonds, pos=None, edge_weight=None)
     if train:
         pred_model.zero_grad()
-        pred = pred_model(h, bonds, pos=None, edge_weight=None, batch=batch)
+        pred = pred_model(Xs, h, bonds, pos=None, edge_weight=None, batch=batch)
         # clip norm
         pred = scaler.scale_up(pred)
         loss = F.l1_loss(pred, target)
@@ -161,7 +160,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
         log.append(loss.detach().cpu())
     else:
         with th.no_grad():
-            pred = pred_model(h, bonds, pos=None, edge_weight=None, batch=batch)
+            pred = pred_model(Xs, h, bonds, pos=None, edge_weight=None, batch=batch)
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
@@ -200,7 +199,7 @@ def pred_qm9(args):
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
     # only do single target training
-    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_att_layer=args.num_pred_layers)
+    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_att_layer=args.num_pretrain_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
