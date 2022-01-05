@@ -148,6 +148,7 @@ def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, tr
     Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     with th.no_grad():
         Xs = pretrain_model.encoder.encode(Z, bonds, pos=None, edge_weight=None)
+        h = Xs[-1]
     if train:
         pred_model.zero_grad()
         pred = pred_model(Xs, h, bonds, pos=None, edge_weight=None, batch=batch)
@@ -194,9 +195,10 @@ def pred_qm9(args):
         json.dump(vars(args), f)
     data_file = os.path.join(args.data_dir, args.dataset)
     targetname = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
-    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
+    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head,
+        num_att_layer=args.num_pretrain_layers, num_elems=args.num_elems)
 
-    pretrain_model.load_state_dict(th.load(args.ckpt_file))
+    pretrain_model.load_state_dict(th.load(args.ckpt_file, map_location=th.device('cuda:%s' % args.gpu)))
 
     # only do single target training
     pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_att_layer=args.num_pretrain_layers)

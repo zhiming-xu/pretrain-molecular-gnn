@@ -1002,9 +1002,6 @@ class PMNetEncoderLayer(MessagePassing):
 
 
 class PMNetPredictionLayer(PMNetEncoderLayer):
-    def __init__(self, **args):
-        super(PMNetEncoderLayer, self).__init__(args)
-
     def forward(self, query, key, value, edge_index: Adj, pos: OptTensor,
                 edge_weight: OptTensor, return_attention_weights=None):
         r"""
@@ -1016,9 +1013,12 @@ class PMNetPredictionLayer(PMNetEncoderLayer):
         """
 
         H, C = self.heads, self.out_channels
+        q = self.lin_query(query).view(-1, H, C)
+        k = self.lin_key(key).view(-1, H, C)
+        v = self.lin_value(value).view(-1, H, C)
 
         # propagate_type: (query: Tensor, key:Tensor, value: Tensor, edge_attr: OptTensor) # noqa
-        out = self.propagate(edge_index, query=query, key=key, value=value, pos=pos,
+        out = self.propagate(edge_index, query=q, key=k, value=v, pos=pos,
                              edge_weight=edge_weight, size=None)
 
         alpha = self._alpha
@@ -1030,7 +1030,7 @@ class PMNetPredictionLayer(PMNetEncoderLayer):
             out = out.mean(dim=1)
 
         if self.root_weight:
-            x_r = self.lin_skip(x[1])
+            x_r = self.lin_skip(query)
             if self.lin_beta is not None:
                 beta = self.lin_beta(th.cat([out, x_r, out - x_r], dim=-1))
                 beta = beta.sigmoid()
