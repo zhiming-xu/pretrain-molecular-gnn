@@ -676,11 +676,16 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class PropertyPredictionTransformer(nn.Module):
-    def __init__(self, hidden_size, num_head=4, rbf_size=9, num_att_layer=3, dropout=0.5, reduce=True):
+    def __init__(self, hidden_size, num_head=16, rbf_size=9, num_att_layer=6, dropout=0.5, reduce=True):
         super().__init__()
-        self.transformers = nn.ModuleList(
+        self.self_attentions = nn.ModuleList(
             PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head,
-                               beta=True, rbf_size=rbf_size, dropout=dropout)
+                              beta=True, rbf_size=rbf_size, dropout=dropout)
+            for _ in range(num_att_layer)
+        )
+        self.cross_attentions = nn.ModuleList(
+            PMNetPredictionLayer(hidden_size, hidden_size//num_head, num_head,
+                                 beta=True, rbf_size=rbf_size, dropout=dropout)
             for _ in range(num_att_layer)
         )
  
@@ -695,24 +700,33 @@ class PropertyPredictionTransformer(nn.Module):
         )
 
         self.output_layer = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size//2),
             nn.Softplus(),
-            nn.Linear(hidden_size, 1)
+            nn.Linear(hidden_size//2, hidden_size//8),
+            nn.Softplus(),
+            nn.Linear(hidden_size//8, 1)
         )
         self.num_att_layer = num_att_layer 
         self.reduce = reduce
         self.layer_norm = LayerNorm(hidden_size)
         self.activation = nn.Softplus()
 
-    def forward(self, h, edge_indices, pos, edge_weight, batch):
+    def forward(self, Xs, h, edge_indices, pos, edge_weight, batch):
         for i in range(self.num_att_layer):
             h = self.layer_norm(h)
+            # self attention & add-norm
             h = h + self.activation(
-                self.transformers[i](h, edge_indices, pos, edge_weight)
+                self.self_attentions[i](h, edge_indices, pos, edge_weight)
             )
             h = self.layer_norm(h)
+            # cross attention & add-norm
+            h = h + self.activation(
+                self.cross_attentions[i](Xs[i], Xs[i], h, edge_indices, pos, edge_weight)
+            )
+            h = self.layer_norm(h)
+            # feed forward & add-norm
             h = h + self.ffns[i](h)
-        
+ 
         if self.reduce:
             h = scatter_add(h, batch.to(h.device), dim=0)
  
@@ -759,6 +773,20 @@ class PMNetEncoder(nn.Module):
         # X = self.layer_norm(X)
  
         return self.layer_norm(Xs[-1])
+
+    def encode(self, atom_ids, edge_indices, pos, edge_weight):
+        atom_embs = self.atom_emb(atom_ids)
+        Xs = [atom_embs]
+        for i in range(self.num_att_layer):
+            atom_embs = self.layer_norm(atom_embs)
+            atom_embs = atom_embs + self.activation(
+                self.transformers[i](atom_embs, edge_indices, pos, edge_weight)
+            )
+            atom_embs = self.layer_norm(atom_embs)
+            atom_embs = atom_embs + self.ffns[i](atom_embs)
+            Xs.append(atom_embs)
+ 
+        return [self.layer_norm(X).detach() for X in Xs]
 
 
 class PMNetDecoder(nn.Module):
@@ -971,3 +999,50 @@ class PMNetEncoderLayer(MessagePassing):
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, heads={self.heads})')
+
+
+class PMNetPredictionLayer(PMNetEncoderLayer):
+    def __init__(self, **args):
+        super(PMNetEncoderLayer, self).__init__(args)
+
+    def forward(self, query, key, value, edge_index: Adj, pos: OptTensor,
+                edge_weight: OptTensor, return_attention_weights=None):
+        r"""
+        Args:
+            return_attention_weights (bool, optional): If set to :obj:`True`,
+                will additionally return the tuple
+                :obj:`(edge_index, attention_weights)`, holding the computed
+                attention weights for each edge. (default: :obj:`None`)
+        """
+
+        H, C = self.heads, self.out_channels
+
+        # propagate_type: (query: Tensor, key:Tensor, value: Tensor, edge_attr: OptTensor) # noqa
+        out = self.propagate(edge_index, query=query, key=key, value=value, pos=pos,
+                             edge_weight=edge_weight, size=None)
+
+        alpha = self._alpha
+        self._alpha = None
+
+        if self.concat:
+            out = out.view(-1, self.heads * self.out_channels)
+        else:
+            out = out.mean(dim=1)
+
+        if self.root_weight:
+            x_r = self.lin_skip(x[1])
+            if self.lin_beta is not None:
+                beta = self.lin_beta(th.cat([out, x_r, out - x_r], dim=-1))
+                beta = beta.sigmoid()
+                out = beta * x_r + (1 - beta) * out
+            else:
+                out += x_r
+
+        if isinstance(return_attention_weights, bool):
+            assert alpha is not None
+            if isinstance(edge_index, Tensor):
+                return out, (edge_index, alpha)
+            elif isinstance(edge_index, SparseTensor):
+                return out, edge_index.set_value(alpha, layout='coo')
+        else:
+            return out
