@@ -353,7 +353,7 @@ class PhysNetInteractionMsgPassing(MessagePassing):
         super().__init__(aggr='add')
         self.activation_fn = activation_fn
         self.dropout = nn.Dropout(drop_prob)
-        self.rbf = ExponentialRBF(cutoff=10., K=K)
+        self.rbf = ExponentialRBF(cutoff=10., rbf_size=K)
         self.k2f = nn.Linear(K, F, bias=False)
         self.dense_i = nn.Linear(F, F)
         self.dense_j = nn.Linear(F, F)
@@ -409,14 +409,14 @@ class AtomwiseMsgPassingAttention(nn.Module):
 
 
 class ExponentialRBF(nn.Module):
-    def __init__(self, cutoff, K):
+    def __init__(self, cutoff, rbf_size):
         super(ExponentialRBF, self).__init__()
-        self.K = K
+        self.K = rbf_size
         self.cutoff = cutoff
-        centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), K))
+        centers = softplus_inverse(np.linspace(1., np.exp(-cutoff), rbf_size))
         self.register_buffer('centers', F.softplus(th.FloatTensor(centers)))
 
-        widths = th.FloatTensor([softplus_inverse((.5/((1.-np.exp(-cutoff))/K))**2)] * K)
+        widths = th.FloatTensor([softplus_inverse((.5/((1.-np.exp(-cutoff))/rbf_size))**2)] * rbf_size)
         self.register_buffer('widths', F.softplus(widths))
 
     def cutoff_fn(self, D):
@@ -625,7 +625,7 @@ class MultiHeadAttention(MessagePassing):
         self.W_q = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_k = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
         self.W_v = nn.Linear(hidden_size, hidden_size*num_head, bias=False)
-        self.rbf = ExponentialRBF(cutoff=10., K=rbf_size)
+        self.rbf = ExponentialRBF(cutoff=10., rbf_size=rbf_size)
         self.linear_i = nn.Linear(hidden_size, hidden_size)
         self.linear_j = nn.Linear(hidden_size, hidden_size)
         self.edge_linear = nn.Linear(3*hidden_size, hidden_size*num_head)
@@ -857,11 +857,13 @@ class PMNetEncoderLayer(MessagePassing):
         if isinstance(in_channels, int):
             in_channels = (in_channels, in_channels)
 
-        self.rbf = ExponentialRBF(cutoff=cutoff, K=rbf_size)
+        self.rbf = ExponentialRBF(cutoff=cutoff, rbf_size=rbf_size)
         self.lin_key = Linear(in_channels[0], heads * out_channels)
         self.lin_query = Linear(in_channels[1], heads * out_channels)
         self.lin_value = Linear(in_channels[0], heads * out_channels)
         self.lin_edge = Linear(self.edge_dim, heads * out_channels, bias=False)
+        self.lin_qk1 = Linear(out_channels, out_channels)
+        self.lin_qk2 = Linear(3 * out_channels, out_channels)
 
         if concat:
             self.lin_skip = Linear(in_channels[1], heads * out_channels,
@@ -943,24 +945,27 @@ class PMNetEncoderLayer(MessagePassing):
                 pos_i: OptTensor, pos_j: OptTensor, edge_weight: Tensor,
                 index: Tensor, ptr: OptTensor, size_i: Optional[int]) -> Tensor:
 
-        edge_attr = 0
+        w_pos = 0
         if pos_i is not None and pos_j is not None:
             dist = th.norm(pos_i-pos_j, dim=-1)
             dist_exp = self.rbf(dist)
-            edge_attr = self.lin_edge(
+            w_pos = self.lin_edge(
                 th.cat([dist_exp, edge_weight.unsqueeze(-1)], dim=-1)
             ).view(-1, self.heads, self.out_channels)
-        
-        key_j += edge_attr
 
-        alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
-        alpha = softmax(alpha, index, ptr, size_i)
-        self._alpha = alpha
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        w_alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
+        w_alpha = softmax(w_alpha, index, ptr, size_i)
+        self._alpha = w_alpha
+        w_alpha = F.dropout(w_alpha, p=self.dropout, training=self.training)
 
-        out = value_j + edge_attr
+        query_i_t = self.lin_qk1(query_i)
+        key_j_t = self.lin_qk1(key_j)
+        w_dir = self.lin_qk2(th.cat(
+            [query_i_t+key_j_t, query_i_t-key_j_t, query_i_t*key_j_t],
+            dim=-1)
+        )
 
-        out *= alpha.view(-1, self.heads, 1)
+        out = value_j * (w_alpha.view(-1, self.heads, 1) + w_pos + w_dir)
         return out
 
     def __repr__(self) -> str:
