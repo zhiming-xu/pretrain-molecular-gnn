@@ -85,14 +85,14 @@ def pretrain(args):
         total_losses = [], [], [], [], [], [], [], [], []
         for batch_idx, data in enumerate(tqdm(dataloader, leave=False)):
             model.zero_grad()
-            Z, R, idx_ij, idx_ijk, bonds, edge_weight, \
+            Z, X, R, idx_ij, idx_ijk, bonds, edge_weight, \
                 bond_type, bond_length, bond_angle, plane, torsion = \
-            data.z, data.pos, data.idx_ij.T, data.idx_ijk, data.edge_index, data.edge_weight, \
+            data.z, data.x, data.pos, data.idx_ij.T, data.idx_ijk, data.edge_index, data.edge_weight, \
                 data.bond_type, data.bond_length, data.bond_angle, data.plane, data.torsion
             
             atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(Z, R, idx_ij, idx_ijk, bonds, edge_weight, plane)
+                model(X, R, idx_ij, idx_ijk, bonds, edge_weight, plane)
             loss_atom_type = ce_loss(atom_type_pred, Z)
             loss_bond_type = ce_loss(bond_type_pred, bond_type)
             loss_bond_length = mae_loss(bond_length_pred, bond_length)
