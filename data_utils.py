@@ -1,10 +1,14 @@
 import scipy.io as si
 import numpy as np
 import torch as th
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torch_geometric as pyg
 from torch_geometric.transforms import BaseTransform
+from torch_geometric.data import Data
+from torch_geometric.datasets import QM9
 from scipy.linalg import fractional_matrix_power, inv
+from tqdm import tqdm
 
 
 z2id = {1:0, 6: 1, 7:2, 8:3, 16: 4}
@@ -361,3 +365,150 @@ class Scaler:
             tensor = tensor * self.max
             tensor = tensor + self.min
         return tensor
+
+
+HAR2EV = 27.211386246
+KCALMOL2EV = 0.04336414
+
+conversion = th.tensor([
+    1., 1., HAR2EV, HAR2EV, HAR2EV, 1., HAR2EV, HAR2EV, HAR2EV, HAR2EV, HAR2EV,
+    1., KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, 1., 1., 1.
+])
+
+
+class QM9Dataset(QM9):
+    def get_atom_features(self, atom, one_hot_formal_charge=True):
+        """Calculate atom features.
+ 
+        Args:
+            atom (rdchem.Atom): An RDKit Atom object.
+            one_hot_formal_charge (bool): If True, formal charges on atoms are one-hot encoded.
+
+        Returns:
+            A 1-dimensional array (ndarray) of atom features.
+        """
+        def one_hot_vector(val, lst):
+            """Converts a value to a one-hot vector based on options in lst"""
+            if val not in lst:
+                val = lst[-1]
+            return map(lambda x: x == val, lst)
+
+        attributes = []
+        attributes += one_hot_vector(
+            atom.GetAtomicNum(),
+            [1, 5, 6, 7, 8, 9, 15, 16, 17, 35, 53, 999]
+        )
+
+        attributes += one_hot_vector(
+            len(atom.GetNeighbors()),
+            [0, 1, 2, 3, 4, 5]
+        )
+
+        num_hs = 0
+        for neighbor in atom.GetNeighbors():
+            if neighbor.GetAtomicNum() == 1:
+                num_hs += 1
+        attributes += one_hot_vector(
+            num_hs,
+            [0, 1, 2, 3, 4]
+        )
+
+        if one_hot_formal_charge:
+            attributes += one_hot_vector(
+                atom.GetFormalCharge(),
+                [-1, 0, 1]
+            )
+        else:
+            attributes.append(atom.GetFormalCharge())
+
+        attributes.append(atom.IsInRing())
+        attributes.append(atom.GetIsAromatic())
+
+        return np.array(attributes, dtype=np.float32)
+
+    def process(self):
+        try:
+            import rdkit
+            from rdkit import Chem
+            from rdkit.Chem.rdchem import HybridizationType
+            from rdkit.Chem.rdchem import BondType as BT
+            from rdkit import RDLogger
+            RDLogger.DisableLog('rdApp.*')
+
+        except ImportError:
+            raise RuntimeError('No RDKit Installation Found!')
+
+        types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
+        bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
+
+        with open(self.raw_paths[1], 'r') as f:
+            target = f.read().split('\n')[1:-1]
+            target = [[float(x) for x in line.split(',')[1:20]]
+                      for line in target]
+            target = th.tensor(target, dtype=th.float)
+            target = th.cat([target[:, 3:], target[:, :3]], dim=-1)
+            target = target * conversion.view(1, -1)
+
+        with open(self.raw_paths[2], 'r') as f:
+            skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
+
+        suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False,
+                                   sanitize=False)
+
+        data_list = []
+        for i, mol in enumerate(tqdm(suppl)):
+            if i in skip:
+                continue
+
+            N = mol.GetNumAtoms()
+
+            pos = suppl.GetItemText(i).split('\n')[4:4 + N]
+            pos = [[float(x) for x in line.split()[:3]] for line in pos]
+            pos = th.tensor(pos, dtype=th.float)
+
+            type_idx = []
+            atomic_number = []
+            x = []
+            
+            for atom in mol.GetAtoms():
+                type_idx.append(types[atom.GetSymbol()])
+                atomic_number.append(atom.GetAtomicNum())
+                x.append(self.get_atom_features(atom))
+
+            z = th.tensor(atomic_number, dtype=th.long)
+
+            row, col, edge_type = [], [], []
+            for bond in mol.GetBonds():
+                start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                row += [start, end]
+                col += [end, start]
+                edge_type += 2 * [bonds[bond.GetBondType()]]
+
+            edge_index = th.tensor([row, col], dtype=th.long)
+            edge_type = th.tensor(edge_type, dtype=th.long)
+            edge_attr = F.one_hot(edge_type,
+                                  num_classes=len(bonds)).to(th.float)
+
+            perm = (edge_index[0] * N + edge_index[1]).argsort()
+            edge_index = edge_index[:, perm]
+            edge_type = edge_type[perm]
+            edge_attr = edge_attr[perm]
+
+            row, col = edge_index
+
+            x = th.tensor(x)
+
+            y = target[i].unsqueeze(0)
+            name = mol.GetProp('_Name')
+
+            data = Data(x=x, z=z, pos=pos, edge_index=edge_index,
+                        edge_attr=edge_attr, y=y, name=name, idx=i)
+
+            if self.pre_filter is not None and not self.pre_filter(data):
+                continue
+            if self.pre_transform is not None:
+                data = self.pre_transform(data)
+
+            data_list.append(data)
+
+        th.save(self.collate(data_list), self.processed_paths[0])
