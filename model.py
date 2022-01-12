@@ -620,11 +620,11 @@ class PhysNetPretrain(nn.Module):
 
 
 class PMNetEncoder(nn.Module):
-    def __init__(self, num_elems, hidden_size, num_head, rbf_size, num_att_layer, slop=.1, dropout=.5):
+    def __init__(self, num_feat, hidden_size, num_head, rbf_size, num_att_layer, slop=.1, dropout=.5):
         super().__init__()
         self.num_att_layer = num_att_layer
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.atom_emb = nn.Embedding(num_elems, hidden_size)
+        self.atom_emb = nn.Linear(num_feat, hidden_size)
         self.transformers = nn.ModuleList(
             PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head, beta=True, rbf_size=rbf_size,
                               dropout=dropout)
@@ -643,8 +643,8 @@ class PMNetEncoder(nn.Module):
         # self.ipa_transformer = IPATransformer(dim=hidden_size, depth=num_att_layer, require_pairwise_repr=False)
 
     def forward(self, atom_embs, edge_indices, pos, edge_weight):
-        # atom_embs = self.atom_emb(atom_ids)
-        Xs = [atom_embs]
+        atom_embs = self.activation(self.atom_emb(atom_embs))
+        Xs = []
         for i in range(self.num_att_layer):
             # add-norm for transformer layer
             atom_embs = atom_embs + self.activation(
@@ -663,17 +663,17 @@ class PMNetEncoder(nn.Module):
 
 
 class PMNetDecoder(nn.Module):
-    def __init__(self, num_elems, hidden_size, num_head, rbf_size, num_att_layer, slop=.1, dropout=.5):
+    def __init__(self, num_feats, hidden_size, num_head, rbf_size, num_att_layer, slop=.1, dropout=.5):
         super().__init__()
         self.num_att_layer = num_att_layer
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.atom_emb = nn.Embedding(num_elems, hidden_size)
-        self.self_attention = nn.ModuleList(
+        self.atom_emb = nn.Linear(num_feats, hidden_size)
+        self.self_attentions = nn.ModuleList(
             PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head, beta=True, rbf_size=rbf_size,
                               dropout=dropout)
             for _ in range(num_att_layer)
         )
-        self.cross_attention = nn.ModuleList(
+        self.cross_attentions = nn.ModuleList(
             PMNetEncoderLayer(hidden_size, hidden_size//num_head, num_head, beta=True, rbf_size=rbf_size,
                               dropout=dropout)
             for _ in range(num_att_layer)
@@ -692,16 +692,16 @@ class PMNetDecoder(nn.Module):
 
     def forward(self, atom_embs_enc, atom_embs, edge_indices, pos, edge_weight):
         # atom_embs = self.atom_emb(atom_ids)
-        Xs = [atom_embs]
+        Xs = []
         for i in range(self.num_att_layer):
             # add-norm for self-attention transformer
             atom_embs = atom_embs + self.activation(
-                self.transformers[i](atom_embs, edge_indices, pos, edge_weight)
+                self.self_attentions[i](atom_embs, edge_indices, pos, edge_weight)
             )
             atom_embs = self.layer_norm(atom_embs)
             # add-norm for transformer layer
             atom_embs = atom_embs + self.activation(
-                self.transformers[i]((atom_embs_enc[i], atom_embs), edge_indices, pos, edge_weight)
+                self.cross_attentions[i]((atom_embs_enc[i], atom_embs), edge_indices, pos, edge_weight)
             )
             atom_embs = self.layer_norm(atom_embs)
             # add-norm for ffn layer
@@ -759,16 +759,17 @@ class PMNetPretrainer(nn.Module):
 
 class PMNet(nn.Module):
     def __init__(self, hidden_size=64, num_head=8, rbf_size=9, num_att_layer=6,
-                 num_elems=20, num_bond_types=4, dropout=0.5, mode='pretrain'):
+                 num_feats=28, num_elems=5, num_bond_types=4, dropout=0.5, mode='pretrain'):
         super().__init__()
-        self.encoder = PMNetEncoder(num_elems, hidden_size, num_head, rbf_size,
+        self.encoder = PMNetEncoder(num_feats, hidden_size, num_head, rbf_size,
                                     num_att_layer, dropout=dropout)
-        self.decoder = PMNetDecoder(num_elems, hidden_size, num_head, rbf_size,
+        self.decoder = PMNetDecoder(num_feats, hidden_size, num_head, rbf_size,
                                     num_att_layer, dropout=dropout)
         if mode == 'pretrain':
             self.generator = PMNetPretrainer(hidden_size, num_elems, num_bond_types)
         elif mode == 'pred':
             self.generator = PropertyPrediction(hidden_size)
+        self.mode = mode
 
     def forward(self, Z, R, idx_ij, idx_ijk, bonds, edge_weight, plane, batch=None):
         Xs = self.encoder(Z, bonds, R, edge_weight)
