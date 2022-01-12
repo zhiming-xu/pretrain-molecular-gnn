@@ -815,7 +815,7 @@ class PMNetEncoderLayer(MessagePassing):
         self.beta = beta and root_weight
         self.root_weight = root_weight
         self.concat = concat
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.edge_dim = rbf_size + 1
         self._alpha = None
 
@@ -917,11 +917,11 @@ class PMNetEncoderLayer(MessagePassing):
             w_pos = self.lin_edge(
                 th.cat([dist_exp, edge_weight.unsqueeze(-1)], dim=-1)
             ).view(-1, self.heads, self.out_channels)
+            w_pos = self.dropout(w_pos)
 
         w_alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
-        w_alpha = softmax(w_alpha, index, ptr, size_i)
+        w_alpha = self.dropout(softmax(w_alpha, index, ptr, size_i))
         self._alpha = w_alpha
-        w_alpha = F.dropout(w_alpha, p=self.dropout, training=self.training)
 
         query_i_t = self.lin_qk1(query_i)
         key_j_t = self.lin_qk1(key_j)
@@ -929,6 +929,7 @@ class PMNetEncoderLayer(MessagePassing):
             [query_i_t+key_j_t, query_i_t-key_j_t, query_i_t*key_j_t],
             dim=-1)
         )
+        w_dir = self.dropout(w_dir)
 
         out = value_j * (w_alpha.view(-1, self.heads, 1) + w_pos + w_dir)
         return out

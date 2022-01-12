@@ -25,12 +25,16 @@ parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-num_pretrain_layers', type=int, default=6)
-parser.add_argument('-hidden_size_pretrain', type=int, default=1024)
-parser.add_argument('-num_elems', type=int, default=20)
+parser.add_argument('-rbf_size', type=int, default=9)
+parser.add_argument('-hidden_size_pretrain', type=int, default=768)
+parser.add_argument('-num_feats', type=int, default=28)
+parser.add_argument('-num_elems', type=int, default=5)
+parser.add_argument('-num_bond_types', type=int, default=4)
 parser.add_argument('-ckpt_step', type=int, default=10)
 parser.add_argument('-ckpt_file', type=str)
 parser.add_argument('-pretrain_epochs', type=int, default=200)
 parser.add_argument('-lr', type=float, default=1e-4)
+parser.add_argument('-dropout', type=float, default=.5)
 parser.add_argument('-cuda', action='store_true')
 parser.add_argument('-gpu', type=int, default=0)
 parser.add_argument('-pretrain', action='store_true')
@@ -67,7 +71,10 @@ def pretrain(args):
             )]
         ))
         dataloader = DataLoader(dataset, batch_size=args.pretrain_batch_size, shuffle=False)
-    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, num_elems=args.num_elems)
+    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, rbf_size=args.rbf_size,
+                  num_att_layer=args.num_pretrain_layers, num_feats=args.num_feats,
+                  num_elems=args.num_elems, num_bond_types=args.num_bond_types,
+                  dropout=args.dropout, mode='pretrain')
     optimizer = Adam(model.parameters(), lr=args.lr)
     if args.cuda:
         device = th.device('cuda:%s' % args.gpu)
@@ -78,7 +85,7 @@ def pretrain(args):
 
     mae_loss = th.nn.L1Loss()
     ce_loss = th.nn.CrossEntropyLoss()
-    cyc = CyclicKLWeight(200)
+    cyc = CyclicKLWeight(500)
 
     for epoch in tqdm(range(args.pretrain_epochs)):
         loss_atom_types, loss_bond_types, \
@@ -100,8 +107,8 @@ def pretrain(args):
             loss_bond_length = mae_loss(bond_length_pred, bond_length)
             loss_bond_angle = mae_loss(bond_angle_pred, bond_angle)
             loss_torsion = mae_loss(torsion_pred, torsion)
-            # FIXME VAE loss learning schedule
-
+            
+            # cyclic kl divergence schedule
             if epoch < 20:
                 kld_loss = 0
             else:
