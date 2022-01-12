@@ -15,6 +15,7 @@ from torch_geometric.loader import DataLoader
 from warmup_scheduler import GradualWarmupScheduler
 
 from data_utils import PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
+from nn_utils import CyclicKLWeight
 from model import PMNet, PropertyPrediction
 
 
@@ -77,6 +78,7 @@ def pretrain(args):
 
     mae_loss = th.nn.L1Loss()
     ce_loss = th.nn.CrossEntropyLoss()
+    cyc = CyclicKLWeight(200)
 
     for epoch in tqdm(range(args.pretrain_epochs)):
         loss_atom_types, loss_bond_types, \
@@ -99,10 +101,13 @@ def pretrain(args):
             loss_bond_angle = mae_loss(bond_angle_pred, bond_angle)
             loss_torsion = mae_loss(torsion_pred, torsion)
             # FIXME VAE loss learning schedule
-            
+
+            if epoch < 20:
+                kld_loss = 0
+            else:
+                kld_loss = cyc.step() * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
             total_loss = loss_bond_type + loss_atom_type + \
-                loss_bond_length + loss_bond_angle +  loss_torsion + \
-                min(1, 10**(epoch//10-4)) * (loss_length_kld + loss_angle_kld + loss_torsion_kld)
+                loss_bond_length + loss_bond_angle +  loss_torsion + kld_loss 
             total_loss.backward()
             optimizer.step()
 
@@ -116,7 +121,7 @@ def pretrain(args):
             loss_torsion_klds.append(loss_torsion_kld.detach().cpu().numpy())
             total_losses.append(total_loss.detach().cpu().numpy())
             # for DEBUG
-            if epoch == 0:
+            '''if epoch == 0:
                 sw.add_scalar('Debug/Atom Type', loss_atom_type, batch_idx)
                 sw.add_scalar('Debug/Bond Type', loss_bond_type, batch_idx)
                 sw.add_scalar('Debug/Bond Length', loss_bond_length, batch_idx)
@@ -125,7 +130,7 @@ def pretrain(args):
                 sw.add_scalar('Debug/Length KLD', loss_length_kld, batch_idx)
                 sw.add_scalar('Debug/Angle KLD', loss_angle_kld, batch_idx)
                 sw.add_scalar('Debug/Torsion KLD', loss_torsion_kld, batch_idx)
-                sw.add_scalar('Debug/Total', total_loss, batch_idx)
+                sw.add_scalar('Debug/Total', total_loss, batch_idx)'''
  
         total = len(dataloader)
         sw.add_scalar('Loss/Atom Type', sum(loss_atom_types)/total, epoch)
@@ -133,9 +138,10 @@ def pretrain(args):
         sw.add_scalar('Loss/Bond Length', sum(loss_bond_lengths)/total, epoch)
         sw.add_scalar('Loss/Bond Angle', sum(loss_bond_angles)/total, epoch)
         sw.add_scalar('Loss/Torsion', sum(loss_torsions)/total, epoch)
-        sw.add_scalar('Loss/Length KLD', sum(loss_length_klds)/total, epoch)
-        sw.add_scalar('Loss/Angle KLD', sum(loss_angle_klds)/total, epoch)
-        sw.add_scalar('Loss/Torsion KLD', sum(loss_torsion_klds)/total, epoch)
+        if epoch >= 20:
+            sw.add_scalar('Loss/Length KLD', sum(loss_length_klds)/total, epoch)
+            sw.add_scalar('Loss/Angle KLD', sum(loss_angle_klds)/total, epoch)
+            sw.add_scalar('Loss/Torsion KLD', sum(loss_torsion_klds)/total, epoch)
         sw.add_scalar('Loss/Total', sum(total_losses)/total, epoch)
 
         scheduler_w_warmup.step(epoch=epoch, metrics=sum(loss_torsions)/total)
