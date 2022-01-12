@@ -167,11 +167,12 @@ class QuadVAE(VAE):
     def __init__(self, emb_size, hidden_size, num_layers, bias=False):
         super(QuadVAE, self).__init__(hidden_size*2, hidden_size, num_layers-1)
         self.dual_emb_uv = DualEmb(emb_size, hidden_size, bias=bias)
-        self.reduce = nn.Linear(hidden_size*2, hidden_size, bias=bias)
-        self.dual_emb_all = DualEmb(hidden_size*2, hidden_size, bias=bias)
+        self.reduce = nn.Linear(emb_size, hidden_size*2, bias=bias)
+        self.dual_emb_all = DualEmb(hidden_size*4, hidden_size, bias=bias)
 
     def forward(self, gaussians, h_l, h_u, h_v, h_k):
-        h_uv = self.reduce(self.dual_emb_uv(h_u, h_v))
+        h_uv = self.dual_emb_uv(h_u, h_v)
+        h_l, h_k = self.reduce(h_l), self.reduce(h_k)
         h_luv = th.cat([h_uv * h_l, h_uv + h_l], dim=-1)
         h_uvk = th.cat([h_uv * h_k, h_uv + h_k], dim=-1)
         h = self.dual_emb_all(h_luv, h_uvk)
@@ -716,17 +717,17 @@ class PMNetDecoder(nn.Module):
 
 
 class PMNetPretrainer(nn.Module):
-    def __init__(self, hidden_size, num_elems, num_bond_types):
+    def __init__(self, in_size, hidden_size, num_elems, num_bond_types, slop=.1):
         super().__init__()
         self.hidden_size = hidden_size
-        self.atom_type_classifier = MLPClassifier(3, hidden_size, hidden_size, num_elems)
-        self.bond_type_classifier = BilinearClassifier(3, hidden_size, hidden_size, num_bond_types)
-        self.bond_length_vae = DualVAE(hidden_size, hidden_size, 3)
-        self.bond_length_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
-        self.bond_angle_vae = TriVAE(hidden_size, hidden_size, 3)
-        self.bond_angle_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
-        self.torsion_vae = QuadVAE(hidden_size, hidden_size, 3)
-        self.torsion_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.Softplus())
+        self.atom_type_classifier = MLPClassifier(3, in_size, hidden_size, num_elems)
+        self.bond_type_classifier = BilinearClassifier(3, in_size, hidden_size, num_bond_types)
+        self.bond_length_vae = DualVAE(in_size, hidden_size, 3)
+        self.bond_length_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.LeakyReLU(slop))
+        self.bond_angle_vae = TriVAE(in_size, hidden_size, 3)
+        self.bond_angle_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.LeakyReLU(slop))
+        self.torsion_vae = QuadVAE(in_size, hidden_size, 3)
+        self.torsion_linear = nn.Sequential(nn.Linear(hidden_size, 1), nn.LeakyReLU(slop))
 
     def forward(self, X, bonds, idx_ijk, plane):
         # predict atom type
@@ -766,9 +767,9 @@ class PMNet(nn.Module):
         self.decoder = PMNetDecoder(num_feats, hidden_size, num_head, rbf_size,
                                     num_att_layer, dropout=dropout)
         if mode == 'pretrain':
-            self.generator = PMNetPretrainer(hidden_size, num_elems, num_bond_types)
+            self.generator = PMNetPretrainer(hidden_size, hidden_size//4, num_elems, num_bond_types)
         elif mode == 'pred':
-            self.generator = PropertyPrediction(hidden_size)
+            self.generator = PropertyPrediction(hidden_size, hidden_size//4)
         self.mode = mode
 
     def forward(self, Z, R, idx_ij, idx_ijk, bonds, edge_weight, plane, batch=None):
