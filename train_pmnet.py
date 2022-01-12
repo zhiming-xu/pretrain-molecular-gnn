@@ -10,16 +10,16 @@ import json
 from tqdm import tqdm
 from datetime import datetime
 from torch_geometric.transforms import Compose, ToDevice, RadiusGraph
-from torch_geometric.datasets import QM9, MoleculeNet, ZINC
+from torch_geometric.datasets import MoleculeNet, ZINC
 from torch_geometric.loader import DataLoader
 from warmup_scheduler import GradualWarmupScheduler
 
-from data_utils import PMNetTransform, Scaler, DiffusionTransform
-from model import PMNet, PropertyPredictionTransformer
+from data_utils import PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
+from model import PMNet, PropertyPrediction
 
 
 parser = ArgumentParser('PMNet')
-parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9')
+parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9dataset')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
@@ -53,7 +53,7 @@ def pretrain(args):
     data_file = os.path.join(args.data_dir, args.dataset)
 
     if args.dataset == 'qm9':
-        dataset = QM9(args.data_dir, transform=Compose(
+        dataset = QM9Dataset(args.data_dir, transform=Compose(
             [PMNetTransform(), RadiusGraph(r=5), DiffusionTransform(), ToDevice(
                 th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu')
             )]
@@ -201,7 +201,7 @@ def pred_qm9(args):
     pretrain_model.load_state_dict(th.load(args.ckpt_file, map_location=th.device('cuda:%s' % args.gpu)))
 
     # only do single target training
-    pred_model = PropertyPredictionTransformer(args.hidden_size_pretrain, num_att_layer=args.num_pretrain_layers)
+    pred_model = PropertyPrediction(args.hidden_size_pretrain, num_att_layer=args.num_pretrain_layers)
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
 
@@ -269,7 +269,7 @@ def pred_biochem(args):
     pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
     pretrain_model.load_state_dict(th.load(args.ckpt_file))
 
-    pred_model = PropertyPredictionTransformer(hidden_size=args.hidden_size_pretrain)
+    pred_model = PropertyPrediction(hidden_size=args.hidden_size_pretrain)
     
     if args.resume:
         pred_model.load_state_dict(th.load(args.resume_ckpt))
