@@ -1,4 +1,5 @@
-from numpy.testing._private.utils import requires_memory
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,9 +8,8 @@ import dgl
 import dgl.nn as dglnn
 import scipy.sparse as sp
 from invariant_point_attention import IPATransformer
-from torch.nn.modules.normalization import LayerNorm
 from torch_geometric.nn import MessagePassing
-from torch_scatter import scatter_softmax, scatter_add
+from torch_scatter import scatter_add
 th.manual_seed(42)
 
 from nn_utils import *

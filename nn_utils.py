@@ -1,4 +1,5 @@
-from socket import SocketKind
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 from torch import nn
 import math
 import numpy as np

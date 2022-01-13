@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import torch as th
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -282,7 +284,7 @@ def pred_qm9(args):
                 th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
 
 
-# use molnet and zinc instead, do not use md17
+# use biochem datasets, calculate pos with rdkit
 def pred_biochem(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
@@ -340,6 +342,7 @@ def pred_biochem(args):
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
     val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
+    
     for epoch in tqdm(range(args.pred_epochs)):
         train_losses, val_losses, test_losses = [], [], []
         for data in tqdm(train_loader, leave=False):

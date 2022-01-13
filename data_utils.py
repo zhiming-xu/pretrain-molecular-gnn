@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import os
 import numpy as np
 import pandas as pd
@@ -12,7 +14,6 @@ from torch_geometric.datasets import QM9
 import scipy.io as si
 from scipy.linalg import fractional_matrix_power, inv
 from tqdm import tqdm
-import rdkit
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.rdchem import BondType as BT
