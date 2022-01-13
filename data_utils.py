@@ -476,6 +476,7 @@ class QM9Dataset(QM9):
                 x.append(self.get_atom_features(atom))
 
             z = th.tensor(atomic_number, dtype=th.long)
+            t = th.tensor(type_idx, dtype=th.long)
 
             row, col, edge_type = [], [], []
             for bond in mol.GetBonds():
@@ -501,7 +502,7 @@ class QM9Dataset(QM9):
             y = target[i].unsqueeze(0)
             name = mol.GetProp('_Name')
 
-            data = Data(x=x, z=z, pos=pos, edge_index=edge_index,
+            data = Data(x=x, z=z, t=t, pos=pos, edge_index=edge_index,
                         edge_attr=edge_attr, y=y, name=name, idx=i)
 
             if self.pre_filter is not None and not self.pre_filter(data):
