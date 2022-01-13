@@ -13,10 +13,12 @@ from torch_geometric.transforms import Compose, ToDevice, RadiusGraph
 from torch_geometric.datasets import MoleculeNet, ZINC
 from torch_geometric.loader import DataLoader
 from warmup_scheduler import GradualWarmupScheduler
+from sklearn.model_selection import train_test_split
 
-from data_utils import PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
+
+from data_utils import BiochemDataset, PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
 from nn_utils import CyclicKLWeight
-from model import PMNet, PropertyPrediction
+from model import PMNet
 
 
 parser = ArgumentParser('PMNet')
@@ -177,6 +179,7 @@ def run_batch(data, model, log, optim=None, scaler=None, train=False):
             log.append(loss.cpu())
 
 
+'''
 def run_batch_sup(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
     Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     if train:
@@ -195,16 +198,17 @@ def run_batch_sup(data, pretrain_model, pred_model, log, optim=None, scaler=None
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
+'''
 
 
 def pred_qm9(args):
+    targetname = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
     # save arguments
     with open(f'logs/{args.running_id}_predict/args.json', 'w') as f:
         json.dump(vars(args), f)
-    data_file = os.path.join(args.data_dir, args.dataset)
-    targetname = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
+    
     model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, rbf_size=args.rbf_size,
                   num_att_layer=args.num_pretrain_layers, num_feats=args.num_feats,
                   dropout=args.dropout, mode='pred')
@@ -282,21 +286,35 @@ def pred_qm9(args):
 def pred_biochem(args):
     # create summary writer
     sw = SummaryWriter(f'logs/{args.running_id}_predict')
-    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain)
-    pretrain_model.load_state_dict(th.load(args.ckpt_file))
-
-    pred_model = PropertyPrediction(hidden_size=args.hidden_size_pretrain)
+    # save arguments
+    with open(f'logs/{args.running_id}_predict/args.json', 'w') as f:
+        json.dump(vars(args), f)
     
+    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, rbf_size=args.rbf_size,
+                  num_att_layer=args.num_pretrain_layers, num_feats=args.num_feats,
+                  dropout=args.dropout, mode='pred')
+
+    pretrain_state_dict = th.load(args.ckpt_file, map_location=th.device('cpu'))
+    model_state_dict = model.state_dict()
+    # only load parameters in encoder and decoder
+    for name, param in pretrain_state_dict.items():
+        if 'generator' in name:
+             continue
+        if isinstance(param, th.nn.Parameter):
+            param = param.data
+        model_state_dict[name].copy_(param)
+
     if args.resume:
-        pred_model.load_state_dict(th.load(args.resume_ckpt))
+        model.load_state_dict(th.load(args.resume_ckpt, map_location=th.device('cpu')))
+
     if args.cuda:
         device = th.device('cuda:%s' % args.gpu)
-        pretrain_model = pretrain_model.to(device)
-        pred_model = pred_model.to(device)
-    
-    optimizer = Adam(pred_model.parameters(), lr=args.lr)
+        model = model.to(device)
+
+    optimizer = Adam(model.parameters(), lr=args.lr)
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
+
     if args.dataset == 'HIV':
         train_dataset = MoleculeNet(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
@@ -306,26 +324,30 @@ def pred_biochem(args):
         train_dataset = ZINC(args.data_dir, split='train', transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        val_dataset = ZINC(args.data_dir, split='val', transform=Compose([
+        valid_dataset = ZINC(args.data_dir, split='val', transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
         test_dataset = ZINC(args.data_dir, split='test', transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-    else:
-        raise NotImplementedError('no dataset %s' % args.dataset)
+    elif args.dataset.lower() in ['freesolv', 'esol']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        train_dataset, rem = train_test_split(dataset, train_size=.8)
+        valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.pred_batch_size, shuffle=True)
+    val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
     for epoch in tqdm(range(args.pred_epochs)):
         train_losses, val_losses, test_losses = [], [], []
         for data in tqdm(train_loader, leave=False):
-            run_batch_sup(data, pretrain_model, pred_model, train_losses, optimizer, train=True)
+            run_batch(data, model, train_losses, optimizer, train=True)
         for data in tqdm(val_loader, leave=False):
-            run_batch_sup(data, pretrain_model, pred_model, val_losses, optimizer, train=False)
+            run_batch(data, model, val_losses, optimizer, train=False)
         for data in tqdm(test_loader, leave=False):
-            run_batch_sup(data, pretrain_model, pred_model, test_losses, train=False)
+            run_batch(data, model, test_losses, train=False)
         train_losses = th.stack(train_losses)
         val_losses = th.stack(val_losses)
         test_losses = th.stack(test_losses)
@@ -337,7 +359,7 @@ def pred_biochem(args):
         sw.add_scalar('Prediction/Test %s' % args.dataset, test_losses.mean(), epoch)
     
         if (epoch+1) % args.ckpt_step == 0:
-            th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (args.dataset, epoch))
+            th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (args.dataset, epoch))
 
 
 def main():
