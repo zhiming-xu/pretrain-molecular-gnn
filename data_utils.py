@@ -1,14 +1,23 @@
-import scipy.io as si
+import os
 import numpy as np
+import pandas as pd
 import torch as th
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 import torch_geometric as pyg
+from torch.utils.data import Dataset
+from torch_geometric.data.in_memory_dataset import InMemoryDataset
 from torch_geometric.transforms import BaseTransform
 from torch_geometric.data import Data
 from torch_geometric.datasets import QM9
+import scipy.io as si
 from scipy.linalg import fractional_matrix_power, inv
 from tqdm import tqdm
+import rdkit
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit.Chem.rdchem import BondType as BT
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 
 
 z2id = {1:0, 6: 1, 7:2, 8:3, 16: 4}
@@ -376,68 +385,56 @@ conversion = th.tensor([
 ])
 
 
+def get_atom_features(atom, one_hot_formal_charge=True):
+    """Calculate atom features.
+
+    Args:
+        atom (rdchem.Atom): An RDKit Atom object.
+        one_hot_formal_charge (bool): If True, formal charges on atoms are one-hot encoded.
+    Returns:
+        A 1-dimensional array (ndarray) of atom features.
+    """
+    def one_hot_vector(val, lst):
+        """Converts a value to a one-hot vector based on options in lst"""
+        if val not in lst:
+            val = lst[-1]
+        return map(lambda x: x == val, lst)
+    attributes = []
+
+    attributes += one_hot_vector(
+        atom.GetAtomicNum(),
+        [1, 5, 6, 7, 8, 9, 15, 16, 17, 35, 53, 999]
+    )
+
+    attributes += one_hot_vector(
+        len(atom.GetNeighbors()),
+        [0, 1, 2, 3, 4, 5]
+    )
+
+    num_hs = 0
+    for neighbor in atom.GetNeighbors():
+        if neighbor.GetAtomicNum() == 1:
+            num_hs += 1
+    attributes += one_hot_vector(
+        num_hs,
+        [0, 1, 2, 3, 4]
+    )
+
+    if one_hot_formal_charge:
+        attributes += one_hot_vector(
+            atom.GetFormalCharge(),
+            [-1, 0, 1]
+        )
+    else:
+        attributes.append(atom.GetFormalCharge())
+    
+    attributes.append(atom.IsInRing())
+    attributes.append(atom.GetIsAromatic())
+    return np.array(attributes, dtype=np.float32)
+
+
 class QM9Dataset(QM9):
-    def get_atom_features(self, atom, one_hot_formal_charge=True):
-        """Calculate atom features.
- 
-        Args:
-            atom (rdchem.Atom): An RDKit Atom object.
-            one_hot_formal_charge (bool): If True, formal charges on atoms are one-hot encoded.
-
-        Returns:
-            A 1-dimensional array (ndarray) of atom features.
-        """
-        def one_hot_vector(val, lst):
-            """Converts a value to a one-hot vector based on options in lst"""
-            if val not in lst:
-                val = lst[-1]
-            return map(lambda x: x == val, lst)
-
-        attributes = []
-        attributes += one_hot_vector(
-            atom.GetAtomicNum(),
-            [1, 5, 6, 7, 8, 9, 15, 16, 17, 35, 53, 999]
-        )
-
-        attributes += one_hot_vector(
-            len(atom.GetNeighbors()),
-            [0, 1, 2, 3, 4, 5]
-        )
-
-        num_hs = 0
-        for neighbor in atom.GetNeighbors():
-            if neighbor.GetAtomicNum() == 1:
-                num_hs += 1
-        attributes += one_hot_vector(
-            num_hs,
-            [0, 1, 2, 3, 4]
-        )
-
-        if one_hot_formal_charge:
-            attributes += one_hot_vector(
-                atom.GetFormalCharge(),
-                [-1, 0, 1]
-            )
-        else:
-            attributes.append(atom.GetFormalCharge())
-
-        attributes.append(atom.IsInRing())
-        attributes.append(atom.GetIsAromatic())
-
-        return np.array(attributes, dtype=np.float32)
-
     def process(self):
-        try:
-            import rdkit
-            from rdkit import Chem
-            from rdkit.Chem.rdchem import HybridizationType
-            from rdkit.Chem.rdchem import BondType as BT
-            from rdkit import RDLogger
-            RDLogger.DisableLog('rdApp.*')
-
-        except ImportError:
-            raise RuntimeError('No RDKit Installation Found!')
-
         types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
         bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
@@ -513,3 +510,83 @@ class QM9Dataset(QM9):
             data_list.append(data)
 
         th.save(self.collate(data_list), self.processed_paths[0])
+
+
+class BiochemDataset(InMemoryDataset):
+    def __init__(self, root=None, name=None, transform=None, pre_transform=None, pre_filter=None):
+        self.name = name
+        super().__init__(root=root, transform=transform, pre_transform=pre_transform, pre_filter=pre_filter)
+        self.data, self.slices = th.load(self.processed_paths[0])
+
+    @property
+    def raw_dir(self):
+        return os.path.join(self.root, self.name)
+
+    @property
+    def processed_dir(self):
+        return os.path.join(self.root, self.name)
+
+    @property
+    def raw_file_names(self):
+        return '%s.csv' % self.name
+    
+    @property
+    def processed_file_names(self):
+        return 'data.pt'
+
+    def process(self):
+        df = pd.read_csv(os.path.join(self.raw_dir, self.raw_file_names))
+        data_list = []
+
+        for _, (smiles, y) in tqdm(df.iterrows(), total=len(df)):
+            y = th.tensor(y, dtype=th.float).view(1, -1)
+            try:
+                mol = AllChem.MolFromSmiles(smiles)
+            except Exception:
+                print('Incorrect Smiles: %s' % smiles)
+                continue
+            
+            mol = Chem.AddHs(mol)
+            try:
+                AllChem.EmbedMolecule(mol, maxAttempts=5000)
+                AllChem.UFFOptimizeMolecule(mol)
+            except:
+                AllChem.Compute2DCoords(mol)
+            
+            x = []
+            pos = []
+            conf = mol.GetConformer()
+            for atom in mol.GetAtoms():
+                x.append(get_atom_features(atom))
+                xyz = conf.GetAtomPosition(atom.GetIdx())
+                pos.append([xyz.x, xyz.y, xyz.z])
+            x, pos = th.tensor(x, dtype=th.float), th.tensor(pos, dtype=th.float)
+            
+            edge_index = []
+            for bond in mol.GetBonds():
+                i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                edge_index += [[i, j], [j, i]]
+
+            edge_index = th.tensor(edge_index, dtype=th.long)
+            # Sort indices.
+            if edge_index.numel() > 0:
+                perm = (edge_index[0] * mol.GetNumAtoms() + edge_index[1]).argsort()
+                edge_index = edge_index[:, perm]
+  
+            data = Data(x=x, edge_index=edge_index.t(), y=y, smiles=smiles)
+            if self.pre_filter is not None and not self.pre_filter(data):
+                continue
+
+            if self.pre_transform is not None:
+                data = self.pre_transform(data)
+
+            data_list.append(data)
+
+        th.save(self.collate(data_list), self.processed_paths[0])
+    
+    def __repr__(self):
+        return '{}({})'.format(self.name, len(self))
+
+
+if __name__ == '__main__':
+    BiochemDataset('data', 'freesolv')
