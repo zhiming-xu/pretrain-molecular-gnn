@@ -772,13 +772,13 @@ class PMNet(nn.Module):
             self.generator = PropertyPrediction(hidden_size, hidden_size//4)
         self.mode = mode
 
-    def forward(self, Z, R, idx_ij, idx_ijk, bonds, edge_weight, plane, batch=None):
-        Xs = self.encoder(Z, bonds, R, edge_weight)
+    def forward(self, X, R, bonds, edge_weight, **args):
+        Xs = self.encoder(X, bonds, R, edge_weight)
         Xs = self.decoder(Xs, Xs[-1], bonds, R, edge_weight)
         if self.mode == 'pretrain':
-            return self.generator(Xs[-1], idx_ij, idx_ijk, plane)
+            return self.generator(Xs[-1], args['idx_ij'], args['idx_ijk'], args['plane'])
         elif self.mode == 'pred':
-            return self.generator(Xs[-1], batch)
+            return self.generator(Xs[-1], args['batch'])
 
 
 from typing import Union, Tuple, Optional

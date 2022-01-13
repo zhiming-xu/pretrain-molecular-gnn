@@ -26,7 +26,7 @@ parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-num_pretrain_layers', type=int, default=6)
 parser.add_argument('-rbf_size', type=int, default=9)
-parser.add_argument('-hidden_size_pretrain', type=int, default=768)
+parser.add_argument('-hidden_size_pretrain', type=int, default=1024)
 parser.add_argument('-num_feats', type=int, default=28)
 parser.add_argument('-num_elems', type=int, default=5)
 parser.add_argument('-num_bond_types', type=int, default=4)
@@ -83,7 +83,7 @@ def pretrain(args):
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0,
                                                 total_epoch=10, after_scheduler=scheduler)
 
-    mae_loss = th.nn.L1Loss()
+    l1_loss = th.nn.L1Loss()
     ce_loss = th.nn.CrossEntropyLoss()
     cyc = CyclicKLWeight(500)
 
@@ -96,17 +96,17 @@ def pretrain(args):
             model.zero_grad()
             Z, X, R, idx_ij, idx_ijk, bonds, edge_weight, \
                 bond_type, bond_length, bond_angle, plane, torsion = \
-            data.z, data.x, data.pos, data.idx_ij.T, data.idx_ijk, data.edge_index, data.edge_weight, \
+            data.t, data.x, data.pos, data.idx_ij.T, data.idx_ijk, data.edge_index, data.edge_weight, \
                 data.bond_type, data.bond_length, data.bond_angle, data.plane, data.torsion
             
             atom_type_pred, bond_type_pred, bond_length_pred, bond_angle_pred, torsion_pred, \
             loss_length_kld, loss_angle_kld, loss_torsion_kld = \
-                model(X, R, idx_ij, idx_ijk, bonds, edge_weight, plane)
+                model(X, R, bonds, edge_weight, idx_ij=idx_ij, idx_ijk=idx_ijk, plane=plane)
             loss_atom_type = ce_loss(atom_type_pred, Z)
             loss_bond_type = ce_loss(bond_type_pred, bond_type)
-            loss_bond_length = mae_loss(bond_length_pred, bond_length)
-            loss_bond_angle = mae_loss(bond_angle_pred, bond_angle)
-            loss_torsion = mae_loss(torsion_pred, torsion)
+            loss_bond_length = l1_loss(bond_length_pred, bond_length)
+            loss_bond_angle = l1_loss(bond_angle_pred, bond_angle)
+            loss_torsion = l1_loss(torsion_pred, torsion)
             
             # cyclic kl divergence schedule
             if epoch < 20:
@@ -157,24 +157,21 @@ def pretrain(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
-    Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
-    with th.no_grad():
-        Xs = pretrain_model.encoder.encode(Z, bonds, pos=None, edge_weight=None)
-        h = Xs[-1]
+def run_batch(data, model, log, optim=None, scaler=None, train=False):
+    X, R, bonds, edge_weight, batch, target = data.x, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     if train:
-        pred_model.zero_grad()
-        pred = pred_model(Xs, h, bonds, pos=None, edge_weight=None, batch=batch)
+        model.zero_grad()
+        pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
         # clip norm
         pred = scaler.scale_up(pred)
         loss = F.l1_loss(pred, target)
         loss.backward()
-        clip_grad_norm_(pred_model.parameters(), max_norm=1000)
+        clip_grad_norm_(model.parameters(), max_norm=1000)
         optim.step()
         log.append(loss.detach().cpu())
     else:
         with th.no_grad():
-            pred = pred_model(Xs, h, bonds, pos=None, edge_weight=None, batch=batch)
+            pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
             pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
@@ -231,7 +228,7 @@ def pred_qm9(args):
         args.target_idx = [args.target_idx]
     
     for target_idx in args.target_idx:
-        dataset = QM9(args.data_dir, transform=Compose(
+        dataset = QM9Dataset(args.data_dir, transform=Compose(
             [PMNetTransform(), DiffusionTransform(),
             ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))]
         ))
