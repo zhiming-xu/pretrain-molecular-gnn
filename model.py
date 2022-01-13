@@ -255,7 +255,7 @@ class DistanceExpansion(nn.Module):
 
 
 class PropertyPrediction(nn.Module):
-    def __init__(self, input_size, hidden_size=32, num_layers=3):
+    def __init__(self, input_size, hidden_size=32, num_layers=3, slop=.1):
         super(PropertyPrediction, self).__init__()
 
         nets = []
@@ -264,12 +264,12 @@ class PropertyPrediction(nn.Module):
                 nets.append(nn.Linear(input_size, hidden_size))
             else:
                 nets.append(nn.Linear(hidden_size, hidden_size))
-            nets.append(nn.Softplus())
+            nets.append(nn.LeakyReLU(slop))
         
         self.nn = nn.Sequential(*nets)
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
-            nn.Softplus(),
+            nn.LeakyReLU(slop),
             nn.Linear(hidden_size, 1)
         )
     

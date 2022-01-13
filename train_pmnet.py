@@ -26,7 +26,7 @@ parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
 parser.add_argument('-pretrain_batch_size', type=int, default=128)
 parser.add_argument('-num_pretrain_layers', type=int, default=6)
 parser.add_argument('-rbf_size', type=int, default=9)
-parser.add_argument('-hidden_size_pretrain', type=int, default=1024)
+parser.add_argument('-hidden_size_pretrain', type=int, default=768)
 parser.add_argument('-num_feats', type=int, default=28)
 parser.add_argument('-num_elems', type=int, default=5)
 parser.add_argument('-num_bond_types', type=int, default=4)
@@ -205,22 +205,28 @@ def pred_qm9(args):
         json.dump(vars(args), f)
     data_file = os.path.join(args.data_dir, args.dataset)
     targetname = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
-    pretrain_model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head,
-        num_att_layer=args.num_pretrain_layers, num_elems=args.num_elems)
+    model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, rbf_size=args.rbf_size,
+                  num_att_layer=args.num_pretrain_layers, num_feats=args.num_feats,
+                  dropout=args.dropout, mode='pred')
 
-    pretrain_model.load_state_dict(th.load(args.ckpt_file, map_location=th.device('cuda:%s' % args.gpu)))
+    pretrain_state_dict = th.load(args.ckpt_file, map_location=th.device('cpu'))
+    model_state_dict = model.state_dict()
+    # only load parameters in encoder and decoder
+    for name, param in pretrain_state_dict.items():
+        if 'generator' in name:
+             continue
+        if isinstance(param, th.nn.Parameter):
+            param = param.data
+        model_state_dict[name].copy_(param)
 
-    # only do single target training
-    pred_model = PropertyPrediction(args.hidden_size_pretrain, num_att_layer=args.num_pretrain_layers)
     if args.resume:
-        pred_model.load_state_dict(th.load(args.resume_ckpt))
+        model.load_state_dict(th.load(args.resume_ckpt, map_location=th.device('cpu')))
 
     if args.cuda:
         device = th.device('cuda:%s' % args.gpu)
-        pretrain_model = pretrain_model.to(device)
-        pred_model = pred_model.to(device)
+        model = model.to(device)
 
-    optimizer = Adam(pred_model.parameters(), lr=args.lr)
+    optimizer = Adam(model.parameters(), lr=args.lr)
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
@@ -247,11 +253,11 @@ def pred_qm9(args):
         for epoch in tqdm(range(args.pred_epochs)):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, train_losses, optimizer, scaler=scaler, train=True)
+                run_batch(data, model, train_losses, optimizer, scaler=scaler, train=True)
             for data in tqdm(val_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, val_losses, scaler=scaler, train=False)
+                run_batch(data, model, val_losses, scaler=scaler, train=False)
             for data in tqdm(test_loader, leave=False):
-                run_batch(data, pretrain_model, pred_model, test_losses, scaler=scaler, train=False)
+                run_batch(data, model, test_losses, scaler=scaler, train=False)
 
             train_losses = th.stack(train_losses)
             test_losses = th.stack(test_losses)
@@ -269,7 +275,7 @@ def pred_qm9(args):
             sw.add_scalar('Prediction/Test %s' % targetname[target_idx], test_losses.mean(), epoch)
         
             if (epoch+1) % args.ckpt_step == 0:
-                th.save(pred_model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
+                th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
 
 
 # use molnet and zinc instead, do not use md17
