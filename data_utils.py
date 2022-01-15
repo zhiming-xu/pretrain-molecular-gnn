@@ -593,5 +593,38 @@ class BiochemDataset(InMemoryDataset):
         return '{}({})'.format(self.name, len(self))
 
 
+def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1):
+    try:
+        from rdkit.Chem.Scaffolds.MurckoScaffold import MurckoScaffoldSmiles
+    except ModuleNotFoundError:
+        raise ImportError('scaffold module not found')
+    smiles = dataset.data.smiles
+    from collections import defaultdict    
+    scaffolds = defaultdict(list)
+
+    for idx, s in enumerate(smiles):
+        mol = Chem.MolFromSmiles(s)
+        scaffold = MurckoScaffoldSmiles(mol=mol)
+        scaffolds[scaffold].append(idx)
+
+    total_len = len(dataset)
+    train_ratio = round(total_len*train_ratio)
+    valid_ratio = round(total_len*valid_ratio)
+    test_ratio = total_len - train_ratio - valid_ratio
+
+    
+    keys = np.random.shuffle(scaffolds.keys())
+    train_idx, valid_idx, test_idx = [], [], []
+    for scaffold in keys:
+        if len(train_idx)+len(scaffolds[scaffold]) < train_ratio:
+            train_idx += scaffolds[scaffold]
+        elif len(valid_idx)+len(scaffolds[scaffold]) < valid_ratio:
+            valid_idx += scaffolds[scaffold]
+        else:
+            test_idx += scaffolds[scaffold]
+    return dataset[train_idx], dataset[valid_idx], dataset[test_idx]
+
+
 if __name__ == '__main__':
-    BiochemDataset('data', 'freesolv')
+    dataset = BiochemDataset('data', 'freesolv')
+    scaffold_train_valid_test_split(dataset, 0.8, 0.1, 0.1)
