@@ -49,8 +49,6 @@ parser.add_argument('-pred_epochs', type=int, default=500)
 parser.add_argument('-resume', action='store_true')
 parser.add_argument('-resume_ckpt', type=str)
 
-TargetName = ['μ', 'α', 'ε_HOMO', 'ε_LOMO', 'Δε', '<R>²', 'ZPVE²', 'U_0', 'U', 'H', 'G', 'c_v']
-
 
 def pretrain(args):
     # create summary writer
@@ -166,17 +164,19 @@ def run_batch(data, model, log, optim=None, scaler=None, train=False):
     if train:
         model.zero_grad()
         pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
-        # clip norm
-        pred = scaler.scale_up(pred)
+        if scaler:
+            pred = scaler.scale_up(pred)
         loss = F.l1_loss(pred, target)
         loss.backward()
+        # clip norm
         clip_grad_norm_(model.parameters(), max_norm=1000)
         optim.step()
         log.append(loss.detach().cpu())
     else:
         with th.no_grad():
             pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
-            pred = scaler.scale_up(pred)
+            if scaler:
+                pred = scaler.scale_up(pred)
             loss = F.l1_loss(pred, target)
             log.append(loss.cpu())
 
@@ -251,6 +251,7 @@ def pred_qm9(args):
             print('scale target %s' % targetname[target_idx])
         else:
             print('keep the magnitude of target %s' % targetname[target_idx])
+            scaler = None
         # use same setting as before, 110k for training, next 10k for validation and last 10k for test
         train_loader = DataLoader(dataset[:110000], batch_size=args.pred_batch_size, shuffle=True)
         val_loader = DataLoader(dataset[110000:120000], batch_size=args.pred_batch_size)
@@ -281,7 +282,8 @@ def pred_qm9(args):
             sw.add_scalar('Prediction/Test %s' % targetname[target_idx], test_losses.mean(), epoch)
         
             if (epoch+1) % args.ckpt_step == 0:
-                th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (target_idx, epoch))
+                th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%s_epoch_%d.th' % 
+                        (targetname[target_idx], epoch))
 
 
 # use biochem datasets, calculate pos with rdkit
@@ -332,7 +334,7 @@ def pred_biochem(args):
         test_dataset = ZINC(args.data_dir, split='test', transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-    elif args.dataset.lower() in ['freesolv', 'esol']:
+    elif args.dataset.lower() in ['freesolv', 'esol', 'lipo']:
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
@@ -362,7 +364,7 @@ def pred_biochem(args):
         sw.add_scalar('Prediction/Test %s' % args.dataset, test_losses.mean(), epoch)
     
         if (epoch+1) % args.ckpt_step == 0:
-            th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%d_epoch_%d.th' % (args.dataset, epoch))
+            th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%s_epoch_%d.th' % (args.dataset, epoch))
 
 
 def main():
