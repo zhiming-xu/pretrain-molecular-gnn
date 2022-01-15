@@ -160,7 +160,7 @@ def pretrain(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, model, log, loss_func, optim=None, scaler=None, train=False):
+def run_batch(data, model, loss_func, log, optim=None, scaler=None, train=False):
     X, R, bonds, edge_weight, batch, target = data.x, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     if train:
         model.zero_grad()
@@ -180,7 +180,7 @@ def run_batch(data, model, log, loss_func, optim=None, scaler=None, train=False)
                 pred = scaler.scale_up(pred)
             loss = loss_func(pred, target)
             log.append(loss.cpu())
-    if loss_func is F.binary_cross_entropy:
+    if loss_func is F.binary_cross_entropy_with_logits:
         return roc_auc_score(target.detach().cpu().numpy(), pred.detach().cpu().numpy())
 
 
@@ -348,10 +348,9 @@ def pred_biochem(args):
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        dataset.y = dataset.y.long()
         train_dataset, rem = train_test_split(dataset, train_size=.8)
         valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
-        loss_func = F.binary_cross_entropy
+        loss_func = F.binary_cross_entropy_with_logits
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
     val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
@@ -377,13 +376,13 @@ def pred_biochem(args):
         metrics = sum(valid_metrics)/len(valid_metrics) if valid_metrics else valid_losses.mean()
         scheduler_w_warmup.step(epoch, metrics=metrics)
         
-        sw.add_scalar('Prediction-Train %s/Loss' % args.dataset, train_losses.mean(), epoch)
-        sw.add_scalar('Prediction-Valid %s/Loss' % args.dataset, valid_losses.mean(), epoch)
-        sw.add_scalar('Prediction-Test %s/Loss' % args.dataset, test_losses.mean(), epoch)
-        if loss_func is F.binary_cross_entropy:
-            sw.add_scalar('Prediction-Train %s/AUC' % args.dataset, sum(train_metrics)/len(train_metrics), epoch)
-            sw.add_scalar('Prediction-Valid %s/AUC' % args.dataset, sum(valid_metrics)/len(valid_metrics), epoch)
-            sw.add_scalar('Prediction-Test %s/AUC' % args.dataset, sum(test_metrics)/len(test_metrics), epoch)
+        sw.add_scalar('Prediction-Train/%s Loss' % args.dataset, train_losses.mean(), epoch)
+        sw.add_scalar('Prediction-Valid/%s Loss' % args.dataset, valid_losses.mean(), epoch)
+        sw.add_scalar('Prediction-Test/%s Loss' % args.dataset, test_losses.mean(), epoch)
+        if loss_func is F.binary_cross_entropy_with_logits:
+            sw.add_scalar('Prediction-Train/%s AUC' % args.dataset, sum(train_metrics)/len(train_metrics), epoch)
+            sw.add_scalar('Prediction-Valid/%s AUC' % args.dataset, sum(valid_metrics)/len(valid_metrics), epoch)
+            sw.add_scalar('Prediction-Test/%s AUC' % args.dataset, sum(test_metrics)/len(test_metrics), epoch)
 
     
         if (epoch+1) % args.ckpt_step == 0:

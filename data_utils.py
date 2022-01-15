@@ -349,6 +349,10 @@ class DiffusionTransform(BaseTransform):
         #     a = a + np.eye(a.shape[0])                                    # A^ = A + I_n
         D = np.diag(np.sum(A, 1))                                           # D^ = Sigma A^_ii
         dinv = fractional_matrix_power(D, -0.5)                             # D^(-1/2)
+        if np.isnan(dinv).any():
+            A = A + np.eye(A.shape[0])
+            D = np.diag(np.sum(A, 1))
+            dinv = fractional_matrix_power(D, -0.5)
         A_tilde = np.matmul(np.matmul(dinv, A), dinv)                       # A~ = D^(-1/2) x A^ x D^(-1/2)
         diffusion = th.FloatTensor(self.alpha * inv((np.eye(A.shape[0]) - (1 - self.alpha) * A_tilde)))    # a(I_n-(1-a)A~)^-1
         data.edge_weight = diffusion[data.edge_index[0], data.edge_index[1]]
