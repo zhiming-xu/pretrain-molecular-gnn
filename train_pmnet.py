@@ -19,7 +19,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 
 
-from data_utils import BiochemDataset, PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
+from data_utils import BiochemDataset, QM9Dataset, PMNetTransform, DiffusionTransform, \
+                       Scaler, scaffold_train_valid_test_split
 from nn_utils import CyclicKLWeight
 from model import PMNet
 
@@ -322,11 +323,7 @@ def pred_biochem(args):
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
-    if args.dataset == 'HIV':
-        train_dataset = MoleculeNet(args.data_dir, name=args.dataset, transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-    elif args.dataset == 'ZINC':
+    if args.dataset.lower() == 'zinc':
         # zinc have predefined splits
         train_dataset = ZINC(args.data_dir, split='train', transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
@@ -341,15 +338,13 @@ def pred_biochem(args):
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, rem = train_test_split(dataset, train_size=.8)
-        valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
+        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
         loss_func = F.l1_loss
-    elif args.dataset.lower() in ['bbbp']:
+    elif args.dataset.lower() in ['bbbp', 'hiv']:
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, rem = train_test_split(dataset, train_size=.8)
-        valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
+        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
         loss_func = F.binary_cross_entropy_with_logits
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
