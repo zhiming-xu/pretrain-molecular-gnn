@@ -16,6 +16,7 @@ from torch_geometric.datasets import MoleculeNet, ZINC
 from torch_geometric.loader import DataLoader
 from warmup_scheduler import GradualWarmupScheduler
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
 
 
 from data_utils import BiochemDataset, PMNetTransform, Scaler, DiffusionTransform, QM9Dataset
@@ -159,14 +160,14 @@ def pretrain(args):
             th.save(model.state_dict(), f'logs/{args.running_id}_pretrain/epoch_%d.th' % epoch)
 
 
-def run_batch(data, model, log, optim=None, scaler=None, train=False):
+def run_batch(data, model, log, loss_func, optim=None, scaler=None, train=False):
     X, R, bonds, edge_weight, batch, target = data.x, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
     if train:
         model.zero_grad()
         pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
-        if scaler:
+        if scaler is not None:
             pred = scaler.scale_up(pred)
-        loss = F.l1_loss(pred, target)
+        loss = loss_func(pred, target)
         loss.backward()
         # clip norm
         clip_grad_norm_(model.parameters(), max_norm=1000)
@@ -175,10 +176,12 @@ def run_batch(data, model, log, optim=None, scaler=None, train=False):
     else:
         with th.no_grad():
             pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
-            if scaler:
+            if scaler is not None:
                 pred = scaler.scale_up(pred)
-            loss = F.l1_loss(pred, target)
+            loss = loss_func(pred, target)
             log.append(loss.cpu())
+    if loss_func is F.binary_cross_entropy:
+        return roc_auc_score(target.detach().cpu().numpy(), pred.detach().cpu().numpy())
 
 
 '''
@@ -340,28 +343,48 @@ def pred_biochem(args):
         ]))
         train_dataset, rem = train_test_split(dataset, train_size=.8)
         valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
+        loss_func = F.l1_loss
+    elif args.dataset.lower() in ['bbbp']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        dataset.y = dataset.y.long()
+        train_dataset, rem = train_test_split(dataset, train_size=.8)
+        valid_dataset, test_dataset = train_test_split(rem, train_size=.5)
+        loss_func = F.binary_cross_entropy
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
     val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
     
     for epoch in tqdm(range(args.pred_epochs)):
-        train_losses, val_losses, test_losses = [], [], []
+        train_losses, valid_losses, test_losses = [], [], []
+        train_metrics, valid_metrics, test_metrics = [], [], []
         for data in tqdm(train_loader, leave=False):
-            run_batch(data, model, train_losses, optimizer, train=True)
+            train_metric = run_batch(data, model, loss_func, train_losses, optimizer, train=True)
         for data in tqdm(val_loader, leave=False):
-            run_batch(data, model, val_losses, optimizer, train=False)
+            valid_metric = run_batch(data, model, loss_func, valid_losses, optimizer, train=False)
         for data in tqdm(test_loader, leave=False):
-            run_batch(data, model, test_losses, train=False)
+            test_metric = run_batch(data, model, loss_func, test_losses, train=False)
         train_losses = th.stack(train_losses)
-        val_losses = th.stack(val_losses)
+        valid_losses = th.stack(valid_losses)
         test_losses = th.stack(test_losses)
- 
-        scheduler_w_warmup.step(epoch, metrics=val_losses.mean())
+        if train_metric is not None:
+            train_metrics.append(train_metric)
+            valid_metrics.append(valid_metric)
+            test_metrics.append(test_metric)
         
-        sw.add_scalar('Prediction/Train %s' % args.dataset, train_losses.mean(), epoch)
-        sw.add_scalar('Prediction/Val %s' % args.dataset, val_losses.mean(), epoch)
-        sw.add_scalar('Prediction/Test %s' % args.dataset, test_losses.mean(), epoch)
+        metrics = sum(valid_metrics)/len(valid_metrics) if valid_metrics else valid_losses.mean()
+        scheduler_w_warmup.step(epoch, metrics=metrics)
+        
+        sw.add_scalar('Prediction-Train %s/Loss' % args.dataset, train_losses.mean(), epoch)
+        sw.add_scalar('Prediction-Valid %s/Loss' % args.dataset, valid_losses.mean(), epoch)
+        sw.add_scalar('Prediction-Test %s/Loss' % args.dataset, test_losses.mean(), epoch)
+        if loss_func is F.binary_cross_entropy:
+            sw.add_scalar('Prediction-Train %s/AUC' % args.dataset, sum(train_metrics)/len(train_metrics), epoch)
+            sw.add_scalar('Prediction-Valid %s/AUC' % args.dataset, sum(valid_metrics)/len(valid_metrics), epoch)
+            sw.add_scalar('Prediction-Test %s/AUC' % args.dataset, sum(test_metrics)/len(test_metrics), epoch)
+
     
         if (epoch+1) % args.ckpt_step == 0:
             th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%s_epoch_%d.th' % (args.dataset, epoch))
