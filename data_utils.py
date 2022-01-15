@@ -18,6 +18,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.rdchem import BondType as BT
 from rdkit import RDLogger
+from collections import defaultdict
+from functools import reduce
 RDLogger.DisableLog('rdApp.*')
 
 
@@ -599,7 +601,6 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
     except ModuleNotFoundError:
         raise ImportError('scaffold module not found')
     smiles = dataset.data.smiles
-    from collections import defaultdict    
     scaffolds = defaultdict(list)
 
     for idx, s in enumerate(smiles):
@@ -612,19 +613,15 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
     valid_ratio = round(total_len*valid_ratio)
     test_ratio = total_len - train_ratio - valid_ratio
 
-    
-    keys = np.random.shuffle(scaffolds.keys())
-    train_idx, valid_idx, test_idx = [], [], []
-    for scaffold in keys:
-        if len(train_idx)+len(scaffolds[scaffold]) < train_ratio:
-            train_idx += scaffolds[scaffold]
-        elif len(valid_idx)+len(scaffolds[scaffold]) < valid_ratio:
-            valid_idx += scaffolds[scaffold]
-        else:
-            test_idx += scaffolds[scaffold]
+    keys = list(scaffolds.keys())
+    np.random.shuffle(keys)
+    reidx = reduce(lambda x, y: x+y, [scaffolds[k] for k in keys])
+    train_idx = reidx[:train_ratio]
+    valid_idx = reidx[train_ratio:train_ratio+valid_ratio]
+    test_idx = reidx[-test_ratio:]
     return dataset[train_idx], dataset[valid_idx], dataset[test_idx]
 
 
 if __name__ == '__main__':
-    dataset = BiochemDataset('data', 'freesolv')
+    dataset = BiochemDataset('~/MAT/data', 'freesolv')
     scaffold_train_valid_test_split(dataset, 0.8, 0.1, 0.1)
