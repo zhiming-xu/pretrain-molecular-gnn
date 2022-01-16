@@ -173,16 +173,17 @@ def run_batch(data, model, loss_func, log, optim=None, scaler=None, train=False)
         # clip norm
         clip_grad_norm_(model.parameters(), max_norm=1000)
         optim.step()
-        log.append(loss.detach().cpu())
+        log[0].append(loss.detach().cpu())
     else:
         with th.no_grad():
             pred = model(X=X, R=R, bonds=bonds, edge_weight=edge_weight, batch=batch)
             if scaler is not None:
                 pred = scaler.scale_up(pred)
             loss = loss_func(pred, target)
-            log.append(loss.cpu())
+            log[0].append(loss.detach().cpu())
     if loss_func is F.binary_cross_entropy_with_logits:
-        return roc_auc_score(target.detach().cpu().numpy(), pred.detach().cpu().numpy())
+        log[1] += target.detach().cpu().view(-1).tolist()
+        log[2] += pred.detach().cpu().view(-1).tolist()
 
 
 '''
@@ -243,6 +244,7 @@ def pred_qm9(args):
     if isinstance(args.target_idx, int):
         args.target_idx = [args.target_idx]
     
+    loss_func = F.l1_loss
     for target_idx in args.target_idx:
         dataset = QM9Dataset(args.data_dir, transform=Compose(
             [PMNetTransform(), DiffusionTransform(),
@@ -264,11 +266,11 @@ def pred_qm9(args):
         for epoch in tqdm(range(args.pred_epochs)):
             train_losses, val_losses, test_losses = [], [], []
             for data in tqdm(train_loader, leave=False):
-                run_batch(data, model, train_losses, optimizer, scaler=scaler, train=True)
+                run_batch(data, model, loss_func, train_losses, optimizer, scaler=scaler, train=True)
             for data in tqdm(val_loader, leave=False):
-                run_batch(data, model, val_losses, scaler=scaler, train=False)
+                run_batch(data, model, loss_func, val_losses, scaler=scaler, train=False)
             for data in tqdm(test_loader, leave=False):
-                run_batch(data, model, test_losses, scaler=scaler, train=False)
+                run_batch(data, model, loss_func, test_losses, scaler=scaler, train=False)
 
             train_losses = th.stack(train_losses)
             test_losses = th.stack(test_losses)
@@ -340,45 +342,44 @@ def pred_biochem(args):
         ]))
         train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
         loss_func = F.l1_loss
+        is_classification = False
     elif args.dataset.lower() in ['bbbp', 'hiv']:
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
+        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset, 0.2, 0.1, 0.1)
         loss_func = F.binary_cross_entropy_with_logits
+        is_classification = True
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
     val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
-    
+ 
     for epoch in tqdm(range(args.pred_epochs)):
-        train_losses, valid_losses, test_losses = [], [], []
-        train_metrics, valid_metrics, test_metrics = [], [], []
+        train_log, valid_log, test_log = [[],[],[]], [[],[],[]], [[],[],[]]
         for data in tqdm(train_loader, leave=False):
-            train_metric = run_batch(data, model, loss_func, train_losses, optimizer, train=True)
+            run_batch(data, model, loss_func, train_log, optimizer, train=True)
         for data in tqdm(val_loader, leave=False):
-            valid_metric = run_batch(data, model, loss_func, valid_losses, optimizer, train=False)
+            run_batch(data, model, loss_func, valid_log, optimizer, train=False)
         for data in tqdm(test_loader, leave=False):
-            test_metric = run_batch(data, model, loss_func, test_losses, train=False)
-        train_losses = th.stack(train_losses)
-        valid_losses = th.stack(valid_losses)
-        test_losses = th.stack(test_losses)
-        if train_metric is not None:
-            train_metrics.append(train_metric)
-            valid_metrics.append(valid_metric)
-            test_metrics.append(test_metric)
+            run_batch(data, model, loss_func, test_log, train=False)
+        train_loss = th.stack(train_log[0])
+        valid_loss = th.stack(valid_log[0])
+        test_loss = th.stack(test_log[0])
         
-        metrics = sum(valid_metrics)/len(valid_metrics) if valid_metrics else valid_losses.mean()
+        metrics = roc_auc_score(valid_log[1], valid_log[2]) if is_classification else valid_log.mean()
         scheduler_w_warmup.step(epoch, metrics=metrics)
         
-        sw.add_scalar('Prediction-Train/%s Loss' % args.dataset, train_losses.mean(), epoch)
-        sw.add_scalar('Prediction-Valid/%s Loss' % args.dataset, valid_losses.mean(), epoch)
-        sw.add_scalar('Prediction-Test/%s Loss' % args.dataset, test_losses.mean(), epoch)
+        sw.add_scalar('Prediction-Train/%s Loss' % args.dataset, train_loss.mean(), epoch)
+        sw.add_scalar('Prediction-Valid/%s Loss' % args.dataset, valid_loss.mean(), epoch)
+        sw.add_scalar('Prediction-Test/%s Loss' % args.dataset, test_loss.mean(), epoch)
         if loss_func is F.binary_cross_entropy_with_logits:
-            sw.add_scalar('Prediction-Train/%s AUC' % args.dataset, sum(train_metrics)/len(train_metrics), epoch)
-            sw.add_scalar('Prediction-Valid/%s AUC' % args.dataset, sum(valid_metrics)/len(valid_metrics), epoch)
-            sw.add_scalar('Prediction-Test/%s AUC' % args.dataset, sum(test_metrics)/len(test_metrics), epoch)
-
+            sw.add_scalar('Prediction-Train/%s AUC' % args.dataset,
+                          roc_auc_score(train_log[1], train_log[2]), epoch)
+            sw.add_scalar('Prediction-Valid/%s AUC' % args.dataset,
+                          roc_auc_score(valid_log[1], valid_log[2]), epoch)
+            sw.add_scalar('Prediction-Test/%s AUC' % args.dataset,
+                          roc_auc_score(test_log[1], test_log[2]), epoch)
     
         if (epoch+1) % args.ckpt_step == 0:
             th.save(model.state_dict(), f'logs/{args.running_id}_predict/target_%s_epoch_%d.th' % (args.dataset, epoch))
