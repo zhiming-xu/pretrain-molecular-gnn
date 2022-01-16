@@ -598,8 +598,11 @@ class BiochemDataset(InMemoryDataset):
 def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1):
     try:
         from rdkit.Chem.Scaffolds.MurckoScaffold import MurckoScaffoldSmiles
+        np.testing.assert_almost_equal(train_ratio+valid_ratio+test_ratio, 1)
     except ModuleNotFoundError:
         raise ImportError('scaffold module not found')
+    except AssertionError:
+        raise RuntimeError('train/valid/test ratios do not add to 1')
     smiles = dataset.data.smiles
     scaffolds = defaultdict(list)
 
@@ -618,7 +621,7 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
     reidx = reduce(lambda x, y: x+y, [scaffolds[k] for k in keys])
     train_idx = reidx[:train_ratio]
     valid_idx = reidx[train_ratio:train_ratio+valid_ratio]
-    test_idx = reidx[-test_ratio:]
+    test_idx = reidx[train_ratio+valid_ratio:train_ratio+valid_ratio+test_ratio]
     return dataset[train_idx], dataset[valid_idx], dataset[test_idx]
 
 
