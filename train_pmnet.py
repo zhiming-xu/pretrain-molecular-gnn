@@ -357,7 +357,7 @@ def pred_biochem(args):
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
         from ogb.graphproppred import PygGraphPropPredDataset
-        idx = PygGraphPropPredDataset(f'obgb-mol{args.dataset.lower()}', root='~/.ogb/').get_idx_split()
+        idx = PygGraphPropPredDataset('ogbg-mol%s' % args.dataset.lower(), root='~/.ogb/').get_idx_split()
         train_dataset, valid_dataset, test_dataset = dataset[idx['train']], dataset[idx['valid']], dataset[idx['test']]
         loss_func = F.binary_cross_entropy_with_logits
         is_classification = True
