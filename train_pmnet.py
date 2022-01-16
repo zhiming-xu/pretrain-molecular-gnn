@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from numpy import testing
+from sklearn.utils import shuffle
 import torch as th
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -343,17 +345,26 @@ def pred_biochem(args):
         train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
         loss_func = F.l1_loss
         is_classification = False
-    elif args.dataset.lower() in ['bbbp', 'hiv']:
+    elif args.dataset.lower() in ['bbbp']:
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset, 0.2, 0.1, 0.1)
+        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
+        loss_func = F.binary_cross_entropy_with_logits
+        is_classification = True
+    elif args.dataset.lower() in ['hiv', 'pcba']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        from ogb.graphproppred import PygGraphPropPredDataset
+        idx = PygGraphPropPredDataset(f'obgb-mol{args.dataset.lower()}', root='~/.ogb/').get_idx_split()
+        train_dataset, valid_dataset, test_dataset = dataset[idx['train']], dataset[idx['valid']], dataset[idx['test']]
         loss_func = F.binary_cross_entropy_with_logits
         is_classification = True
  
     train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
-    val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size)
+    val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size, shuffle=False)
  
     for epoch in tqdm(range(args.pred_epochs)):
         train_log, valid_log, test_log = [[],[],[]], [[],[],[]], [[],[],[]]
@@ -368,7 +379,7 @@ def pred_biochem(args):
         test_loss = th.stack(test_log[0])
         
         metrics = roc_auc_score(valid_log[1], valid_log[2]) if is_classification else valid_log.mean()
-        scheduler_w_warmup.step(epoch, metrics=metrics)
+        scheduler_w_warmup.step(metrics=metrics)
         
         sw.add_scalar('Prediction-Train/%s Loss' % args.dataset, train_loss.mean(), epoch)
         sw.add_scalar('Prediction-Valid/%s Loss' % args.dataset, valid_loss.mean(), epoch)
