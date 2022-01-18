@@ -22,7 +22,7 @@ from sklearn.metrics import roc_auc_score
 
 
 from data_utils import BiochemDataset, QM9Dataset, PMNetTransform, DiffusionTransform, \
-                       Scaler, scaffold_train_valid_test_split
+                       Scaler, train_valid_test_split
 from nn_utils import CyclicKLWeight
 from model import PMNet
 
@@ -342,14 +342,14 @@ def pred_biochem(args):
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
+        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset)
         loss_func = F.l1_loss
         is_classification = False
-    elif args.dataset.lower() in ['bbbp']:
+    elif args.dataset.lower() in ['bbbp', 'mesta-low', 'mesta-high', 'estrogen-alpha', 'estrogen-beta']:
         dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
-        train_dataset, valid_dataset, test_dataset = scaffold_train_valid_test_split(dataset)
+        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset, scaffold=False)
         loss_func = F.binary_cross_entropy_with_logits
         is_classification = True
     elif args.dataset.lower() in ['hiv', 'pcba']:
@@ -357,7 +357,7 @@ def pred_biochem(args):
             DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
         ]))
         from ogb.graphproppred import PygGraphPropPredDataset
-        idx = PygGraphPropPredDataset('ogbg-mol%s' % args.dataset.lower(), root='~/.ogb/').get_idx_split()
+        idx = PygGraphPropPredDataset('ogbg-mol%s' % args.dataset.lower(), root='~/.ogb').get_idx_split()
         train_dataset, valid_dataset, test_dataset = dataset[idx['train']], dataset[idx['valid']], dataset[idx['test']]
         loss_func = F.binary_cross_entropy_with_logits
         is_classification = True

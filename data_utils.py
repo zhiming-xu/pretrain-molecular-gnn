@@ -595,7 +595,7 @@ class BiochemDataset(InMemoryDataset):
         return '{}({})'.format(self.name, len(self))
 
 
-def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1):
+def train_valid_test_split(dataset, scaffold=True, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1):
     try:
         from rdkit.Chem.Scaffolds.MurckoScaffold import MurckoScaffoldSmiles
         np.testing.assert_almost_equal(train_ratio+valid_ratio+test_ratio, 1)
@@ -603,6 +603,20 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
         raise ImportError('scaffold module not found')
     except AssertionError:
         raise RuntimeError('train/valid/test ratios do not add to 1')
+    
+    total_len = len(dataset)
+    train_ratio = round(total_len*train_ratio)
+    valid_ratio = round(total_len*valid_ratio)
+    test_ratio = total_len - train_ratio - valid_ratio
+ 
+    if not scaffold:
+        reidx = list(range(total_len))
+        np.random.shuffle(reidx)
+        train_idx = reidx[:train_ratio]
+        valid_idx = reidx[train_ratio:train_ratio+valid_ratio]
+        test_idx = reidx[train_ratio+valid_ratio:train_ratio+valid_ratio+test_ratio]
+        return dataset[train_idx], dataset[valid_idx], dataset[test_idx]
+    
     smiles = dataset.data.smiles
     scaffolds = defaultdict(list)
 
@@ -610,11 +624,6 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
         mol = Chem.MolFromSmiles(s)
         scaffold = MurckoScaffoldSmiles(mol=mol)
         scaffolds[scaffold].append(idx)
-
-    total_len = len(dataset)
-    train_ratio = round(total_len*train_ratio)
-    valid_ratio = round(total_len*valid_ratio)
-    test_ratio = total_len - train_ratio - valid_ratio
 
     keys = list(scaffolds.keys())
     np.random.shuffle(keys)
@@ -627,4 +636,4 @@ def scaffold_train_valid_test_split(dataset, train_ratio=0.8, valid_ratio=0.1, t
 
 if __name__ == '__main__':
     dataset = BiochemDataset('~/MAT/data', 'freesolv')
-    scaffold_train_valid_test_split(dataset, 0.8, 0.1, 0.1)
+    train_valid_test_split(dataset, 0.8, 0.1, 0.1)
