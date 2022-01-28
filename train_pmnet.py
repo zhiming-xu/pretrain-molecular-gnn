@@ -44,6 +44,8 @@ parser.add_argument('-pretrain_epochs', type=int, default=200)
 parser.add_argument('-lr', type=float, default=1e-4)
 parser.add_argument('-dropout', type=float, default=.5)
 parser.add_argument('-cuda', action='store_true')
+parser.add_argument('-scaffold', action='store_true')
+parser.add_argument('train_valid_test', nargs='+', default=[.8, .1, .1])
 parser.add_argument('-gpu', type=int, default=0)
 parser.add_argument('-pretrain', action='store_true')
 parser.add_argument('-pred', type=str)
@@ -302,6 +304,47 @@ def pred_biochem(args):
     with open(f'logs/{args.running_id}_predict/args.json', 'w') as f:
         json.dump(vars(args), f)
     
+    if args.dataset.lower() == 'zinc':
+        # zinc have predefined splits
+        train_dataset = ZINC(args.data_dir, split='train', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        valid_dataset = ZINC(args.data_dir, split='val', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        test_dataset = ZINC(args.data_dir, split='test', transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+    elif args.dataset.lower() in ['freesolv', 'esol', 'lipo']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset, scaffold=args.scaffold,
+            train_valid_test=args.train_valid_test)
+        loss_func = F.l1_loss
+        is_classification = False
+    elif args.dataset.lower() in ['bace', 'bbbp', 'mesta-low', 'mesta-high', 'estrogen-alpha', 'estrogen-beta']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset, scaffold=args.scaffold,
+            train_valid_test=args.train_valid_test)
+        loss_func = F.binary_cross_entropy_with_logits
+        is_classification = True
+    elif args.dataset.lower() in ['hiv', 'pcba']:
+        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
+            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
+        ]))
+        from ogb.graphproppred import PygGraphPropPredDataset
+        idx = PygGraphPropPredDataset('ogbg-mol%s' % args.dataset.lower(), root='~/.ogb').get_idx_split()
+        train_dataset, valid_dataset, test_dataset = dataset[idx['train']], dataset[idx['valid']], dataset[idx['test']]
+        loss_func = F.binary_cross_entropy_with_logits
+        is_classification = True
+ 
+    train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
+    val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size, shuffle=False)
+ 
     model = PMNet(hidden_size=args.hidden_size_pretrain, num_head=args.num_head, rbf_size=args.rbf_size,
                   num_att_layer=args.num_pretrain_layers, num_feats=args.num_feats,
                   dropout=args.dropout, mode='pred')
@@ -327,45 +370,6 @@ def pred_biochem(args):
     scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.2, verbose=True)
     scheduler_w_warmup = GradualWarmupScheduler(optimizer, multiplier=1.0, total_epoch=10, after_scheduler=scheduler)
 
-    if args.dataset.lower() == 'zinc':
-        # zinc have predefined splits
-        train_dataset = ZINC(args.data_dir, split='train', transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-        valid_dataset = ZINC(args.data_dir, split='val', transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-        test_dataset = ZINC(args.data_dir, split='test', transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-    elif args.dataset.lower() in ['freesolv', 'esol', 'lipo']:
-        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset)
-        loss_func = F.l1_loss
-        is_classification = False
-    elif args.dataset.lower() in ['bbbp', 'mesta-low', 'mesta-high', 'estrogen-alpha', 'estrogen-beta']:
-        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-        train_dataset, valid_dataset, test_dataset = train_valid_test_split(dataset, scaffold=False)
-        loss_func = F.binary_cross_entropy_with_logits
-        is_classification = True
-    elif args.dataset.lower() in ['hiv', 'pcba']:
-        dataset = BiochemDataset(args.data_dir, name=args.dataset, transform=Compose([
-            DiffusionTransform(), ToDevice(th.device('cuda:%s' % args.gpu) if args.cuda else th.device('cpu'))
-        ]))
-        from ogb.graphproppred import PygGraphPropPredDataset
-        idx = PygGraphPropPredDataset('ogbg-mol%s' % args.dataset.lower(), root='~/.ogb').get_idx_split()
-        train_dataset, valid_dataset, test_dataset = dataset[idx['train']], dataset[idx['valid']], dataset[idx['test']]
-        loss_func = F.binary_cross_entropy_with_logits
-        is_classification = True
- 
-    train_loader = DataLoader(train_dataset, batch_size=args.pred_batch_size, shuffle=True)
-    val_loader = DataLoader(valid_dataset, batch_size=args.pred_batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=args.pred_batch_size, shuffle=False)
- 
     for epoch in tqdm(range(args.pred_epochs)):
         train_log, valid_log, test_log = [[],[],[]], [[],[],[]], [[],[],[]]
         for data in tqdm(train_loader, leave=False):
@@ -378,7 +382,7 @@ def pred_biochem(args):
         valid_loss = th.stack(valid_log[0])
         test_loss = th.stack(test_log[0])
         
-        metrics = roc_auc_score(valid_log[1], valid_log[2]) if is_classification else valid_log.mean()
+        metrics = roc_auc_score(valid_log[1], valid_log[2]) if is_classification else valid_loss.mean()
         scheduler_w_warmup.step(metrics=metrics)
         
         sw.add_scalar('Prediction-Train/%s Loss' % args.dataset, train_loss.mean(), epoch)
