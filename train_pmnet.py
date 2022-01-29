@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from numpy import testing
-from sklearn.utils import shuffle
 import torch as th
 import torch.nn.functional as F
 from torch.optim import Adam
