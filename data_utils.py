@@ -545,7 +545,7 @@ class BiochemDataset(InMemoryDataset):
         df = pd.read_csv(os.path.join(self.raw_dir, self.raw_file_names))
         data_list = []
 
-        for _, (smiles, y) in tqdm(df.iterrows(), total=len(df)):
+        for idx, (smiles, y) in tqdm(df.iterrows(), total=len(df)):
             y = th.tensor(y, dtype=th.float).view(1, -1)
             try:
                 mol = AllChem.MolFromSmiles(smiles)
@@ -561,10 +561,12 @@ class BiochemDataset(InMemoryDataset):
                 AllChem.Compute2DCoords(mol)
             
             x = []
+            z = []
             pos = []
             conf = mol.GetConformer()
             for atom in mol.GetAtoms():
                 x.append(get_atom_features(atom))
+                z.append(atom.GetAtomicNum())
                 xyz = conf.GetAtomPosition(atom.GetIdx())
                 pos.append([xyz.x, xyz.y, xyz.z])
             x, pos = th.tensor(x, dtype=th.float), th.tensor(pos, dtype=th.float)
@@ -580,7 +582,9 @@ class BiochemDataset(InMemoryDataset):
                 perm = (edge_index[0] * mol.GetNumAtoms() + edge_index[1]).argsort()
                 edge_index = edge_index[:, perm]
   
-            data = Data(x=x, edge_index=edge_index.t(), y=y, smiles=smiles)
+            data = Data(x=x, edge_index=edge_index.t(), y=y, smiles=smiles, R=pos,
+                        N=th.tensor(mol.GetNumAtoms(), dtype=th.int32),
+                        id=th.tensor(idx, dtype=th.int32), Z=th.tensor(z, dtype=th.int32))
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
 
@@ -590,7 +594,7 @@ class BiochemDataset(InMemoryDataset):
             data_list.append(data)
 
         th.save(self.collate(data_list), self.processed_paths[0])
-    
+ 
     def __repr__(self):
         return '{}({})'.format(self.name, len(self))
 
@@ -636,5 +640,5 @@ def train_valid_test_split(dataset, scaffold=True, train_valid_test=[.8, .1, .1]
 
 
 if __name__ == '__main__':
-    dataset = BiochemDataset('~/MAT/data', 'freesolv')
-    train_valid_test_split(dataset, 0.8, 0.1, 0.1)
+    dataset = BiochemDataset('data', 'esol')
+    train_valid_test_split(dataset, train_valid_test=[0.8, 0.1, 0.1])
