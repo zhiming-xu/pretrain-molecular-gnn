@@ -205,6 +205,7 @@ class ExponentialRBF(nn.Module):
         return rbf
 
 
+class PMNetEncoder(nn.Module):
     def __init__(self, num_feat, hidden_size, num_head, rbf_size, num_att_layer, slop=.1, dropout=.5):
         super().__init__()
         self.num_att_layer = num_att_layer
