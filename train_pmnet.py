@@ -29,7 +29,7 @@ parser = ArgumentParser('PMNet')
 parser.add_argument('-data_dir', type=str, default='~/.pyg/qm9dataset')
 parser.add_argument('-dataset', type=str, default='qm9')
 parser.add_argument('-target_idx', type=int, nargs='+', default=list(range(12)))
-parser.add_argument('-pretrain_batch_size', type=int, default=128)
+parser.add_argument('-pretrain_batch_size', type=int, default=64)
 parser.add_argument('-num_pretrain_layers', type=int, default=6)
 parser.add_argument('-rbf_size', type=int, default=9)
 parser.add_argument('-hidden_size_pretrain', type=int, default=768)
@@ -186,28 +186,6 @@ def run_batch(data, model, loss_func, log, optim=None, scaler=None, train=False)
     if loss_func is F.binary_cross_entropy_with_logits:
         log[1] += target.detach().cpu().view(-1).tolist()
         log[2] += pred.detach().cpu().view(-1).tolist()
-
-
-'''
-def run_batch_sup(data, pretrain_model, pred_model, log, optim=None, scaler=None, train=False):
-    Z, R, bonds, edge_weight, batch, target = data.z, data.pos, data.edge_index, data.edge_weight, data.batch, data.y
-    if train:
-        pred_model.zero_grad()
-        pred = pred_model(Z, bonds, batch)
-        # clip norm
-        pred = scaler.scale_up(pred)
-        loss = F.l1_loss(pred, target)
-        loss.backward()
-        clip_grad_norm_(pred_model.parameters(), max_norm=1000)
-        optim.step()
-        log.append(loss.detach().cpu())
-    else:
-        with th.no_grad():
-            pred = pred_model(Z, bonds, batch)
-            pred = scaler.scale_up(pred)
-            loss = F.l1_loss(pred, target)
-            log.append(loss.cpu())
-'''
 
 
 def pred_qm9(args):
